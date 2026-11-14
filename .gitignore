@@ -1,0 +1,21 @@
+# User persistence files (local user credentials/profile - strictly machine-specific)
+user_data.txt
+.venom_notch_user.txt
+*.user.txt
+*.user_data*
+*.notch_user*
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Operating System files
+Thumbs.db
+Desktop.ini
+.DS_Store
