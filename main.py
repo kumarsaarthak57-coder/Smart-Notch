@@ -22,6 +22,101 @@ def get_current_ist_time() -> str:
     """Returns the current Indian Standard Time (IST) in HH:MM format."""
     return datetime.now(IST_TIMEZONE).strftime("%H:%M")
 
+
+def apply_acrylic_blur(window) -> bool:
+    """
+    Applies Windows DWM Acrylic/Blur-Behind (SetWindowCompositionAttribute / DwmSetWindowAttribute)
+    to frameless translucent Qt windows, allowing wallpapers and desktop windows to blur naturally
+    behind the translucent frosted-glass surface.
+    Safe across Windows 10/11 and a harmless no-op on Linux / non-Windows platforms.
+    """
+    if platform.system() != "Windows":
+        return False
+
+    try:
+        if window is None:
+            return False
+        # Window must have a valid native OS handle
+        hwnd = int(window.winId())
+        if not hwnd:
+            return False
+
+        applied = False
+
+        # 1. Primary: Windows 10/11 SetWindowCompositionAttribute (WCA_ACCENT_POLICY)
+        try:
+            class ACCENT_POLICY(ctypes.Structure):
+                _fields_ = [
+                    ('AccentState', ctypes.c_int),
+                    ('AccentFlags', ctypes.c_int),
+                    ('GradientColor', ctypes.c_uint32),
+                    ('AnimationId', ctypes.c_int)
+                ]
+
+            class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
+                _fields_ = [
+                    ('Attribute', ctypes.c_int),
+                    ('Data', ctypes.POINTER(ACCENT_POLICY)),
+                    ('SizeOfData', ctypes.c_size_t)
+                ]
+
+            policy = ACCENT_POLICY()
+            policy.AccentState = 4  # ACCENT_ENABLE_ACRYLICBLURBEHIND (or 3 for blur)
+            policy.AccentFlags = 2  # Draw all borders
+            policy.GradientColor = 0x66181410  # Translucent dark obsidian tint
+            policy.AnimationId = 0
+
+            data = WINDOWCOMPOSITIONATTRIBDATA()
+            data.Attribute = 19  # WCA_ACCENT_POLICY
+            data.Data = ctypes.pointer(policy)
+            data.SizeOfData = ctypes.sizeof(policy)
+
+            set_comp_attr = getattr(ctypes.windll.user32, "SetWindowCompositionAttribute", None)
+            if set_comp_attr:
+                set_comp_attr.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWCOMPOSITIONATTRIBDATA)]
+                set_comp_attr.restype = ctypes.c_int
+                res = set_comp_attr(wintypes.HWND(hwnd), ctypes.byref(data))
+                if res != 0:
+                    applied = True
+        except Exception:
+            pass
+
+        # 2. Windows 11 Build 22000+ DwmSetWindowAttribute (DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_TRANSIENTWINDOW = 3)
+        try:
+            dwm_set = getattr(ctypes.windll.dwmapi, "DwmSetWindowAttribute", None)
+            if dwm_set:
+                backdrop_type = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW (Acrylic)
+                dwm_set(wintypes.HWND(hwnd), ctypes.c_ulong(38), ctypes.byref(backdrop_type), ctypes.sizeof(backdrop_type))
+                applied = True
+        except Exception:
+            pass
+
+        # 3. Fallback: DwmEnableBlurBehindWindow
+        try:
+            dwm_blur = getattr(ctypes.windll.dwmapi, "DwmEnableBlurBehindWindow", None)
+            if dwm_blur:
+                class DWM_BLURBEHIND(ctypes.Structure):
+                    _fields_ = [
+                        ('dwFlags', ctypes.c_ulong),
+                        ('fEnable', ctypes.c_int),
+                        ('hRgnBlur', ctypes.c_void_p),
+                        ('fTransitionOnMaximized', ctypes.c_int)
+                    ]
+                bb = DWM_BLURBEHIND()
+                bb.dwFlags = 1  # DWM_BB_ENABLE
+                bb.fEnable = 1
+                bb.hRgnBlur = None
+                bb.fTransitionOnMaximized = 0
+                dwm_blur(wintypes.HWND(hwnd), ctypes.byref(bb))
+                applied = True
+        except Exception:
+            pass
+
+        return applied
+    except Exception as ex:
+        print(f"[DEBUG] Window blur application note: {ex}")
+        return False
+
 # --- Local User Storage Configuration ---
 def get_user_data_filepath() -> str:
     """
@@ -773,8 +868,8 @@ class CircularAIButton(QWidget):
         self.button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.button.setStyleSheet(f"""
             QPushButton {{
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1.5px solid rgba(255, 255, 255, 0.16);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 17px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -782,15 +877,15 @@ class CircularAIButton(QWidget):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: rgba(255, 255, 255, 0.18);
+                background-color: rgba(255, 255, 255, 0.16);
                 border: 1.5px solid {accent_color};
             }}
             QPushButton:focus {{
-                background-color: rgba(0, 255, 255, 0.25);
-                border: 2px solid cyan;
+                background-color: rgba(0, 255, 255, 0.22);
+                border: 1.5px solid cyan;
             }}
             QPushButton:pressed {{
-                background-color: rgba(255, 255, 255, 0.28);
+                background-color: rgba(255, 255, 255, 0.26);
             }}
         """)
         self.button.clicked.connect(self.clicked.emit)
@@ -1136,25 +1231,29 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.main_window = main_window
         self.setWindowTitle("UI Settings")
-        self.setFixedWidth(410)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(430)
 
         self.is_committed = False
         self.pending_username = (getattr(self.main_window, "username", "Host") or "Host")[:15]
         self.initial_snapshot = self.take_snapshot()
 
+        apply_acrylic_blur(self)
+
         self.setStyleSheet("""
             QDialog {
-                background-color: #141418;
-                color: #F3F4F6;
-                font-family: 'Segoe UI', sans-serif;
+                background: transparent;
             }
             QLabel {
                 color: #D1D5DB;
                 font-size: 11px;
                 font-weight: 500;
+                background: transparent;
+                border: none;
             }
             QSpinBox {
-                background-color: #22222A;
+                background-color: rgba(255, 255, 255, 0.07);
                 border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 6px;
                 color: #FFFFFF;
@@ -1162,13 +1261,17 @@ class SettingsDialog(QDialog):
                 padding: 4px 8px;
                 min-width: 65px;
             }
+            QSpinBox:hover, QSpinBox:focus {
+                background-color: rgba(255, 255, 255, 0.14);
+                border: 1px solid cyan;
+            }
             QSlider::groove:horizontal {
                 height: 6px;
-                background: #282832;
+                background: rgba(255, 255, 255, 0.08);
                 border-radius: 3px;
             }
             QSlider::sub-page:horizontal {
-                background: cyan;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 cyan, stop:1 #00e5e5);
                 border-radius: 3px;
             }
             QSlider::handle:horizontal {
@@ -1177,9 +1280,13 @@ class SettingsDialog(QDialog):
                 margin-top: -4px;
                 margin-bottom: -4px;
                 border-radius: 7px;
+                border: 1.5px solid rgba(0, 255, 255, 0.8);
+            }
+            QSlider::handle:horizontal:hover {
+                background: cyan;
             }
             QComboBox {
-                background-color: #22222A;
+                background-color: rgba(255, 255, 255, 0.07);
                 border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 6px;
                 color: #FFFFFF;
@@ -1187,35 +1294,66 @@ class SettingsDialog(QDialog):
                 padding: 5px 10px;
                 min-width: 140px;
             }
-            QComboBox QAbstractItemView {
-                background-color: #1A1A22;
+            QComboBox:hover {
+                background-color: rgba(255, 255, 255, 0.16);
                 border: 1px solid cyan;
-                color: #FFFFFF;
-                selection-background-color: cyan;
-                selection-color: black;
-                padding: 4px;
             }
-            QPushButton {
-                background-color: cyan;
-                color: #000000;
-                border: none;
+            QComboBox QAbstractItemView {
+                background-color: rgba(18, 20, 28, 230);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
-                font-size: 11px;
-                font-weight: 700;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #00cccc;
+                color: #FFFFFF;
+                selection-background-color: rgba(0, 255, 255, 0.3);
+                selection-color: #FFFFFF;
+                padding: 4px;
             }
         """)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 22, 22, 22)
-        layout.setSpacing(18)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
-        header = QLabel("⚙️  UI Settings")
-        header.setStyleSheet("font-size: 15px; font-weight: 600; color: #FFFFFF;")
-        layout.addWidget(header)
+        self.card = QFrame(self)
+        self.card.setObjectName("settings_card")
+        self.card.setStyleSheet("""
+            QFrame#settings_card {
+                background-color: rgba(18, 20, 28, 195);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 16px;
+            }
+        """)
+        layout = QVBoxLayout(self.card)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        header_layout = QHBoxLayout()
+        header = QLabel("⚙️  UI Settings", self.card)
+        header.setStyleSheet("font-size: 15px; font-weight: 700; color: #FFFFFF; background: transparent; border: none;")
+        header_layout.addWidget(header)
+        header_layout.addStretch()
+
+        self.btn_x = QPushButton("✕", self.card)
+        self.btn_x.setFixedSize(26, 26)
+        self.btn_x.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_x.setToolTip("Close Settings (Esc)")
+        self.btn_x.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 13px;
+                color: #A0AEC0;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 60, 60, 0.45);
+                border: 1px solid #FF3B30;
+                color: #FFFFFF;
+            }
+        """)
+        self.btn_x.clicked.connect(self.close)
+        header_layout.addWidget(self.btn_x)
+
+        layout.addLayout(header_layout)
 
         form_layout = QFormLayout()
         form_layout.setSpacing(14)
@@ -1240,17 +1378,18 @@ class SettingsDialog(QDialog):
         self.btn_change_username.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_change_username.setStyleSheet("""
             QPushButton {
-                background-color: rgba(0, 255, 255, 0.15);
+                background-color: rgba(255, 255, 255, 0.07);
                 color: cyan;
-                border: 1.5px solid cyan;
+                border: 1px solid rgba(0, 255, 255, 0.45);
                 border-radius: 6px;
                 font-size: 11px;
                 font-weight: 600;
                 padding: 4px 12px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.35);
+                background-color: rgba(255, 255, 255, 0.16);
                 color: #FFFFFF;
+                border-color: cyan;
             }
         """)
         self.btn_change_username.clicked.connect(self._on_change_username_clicked)
@@ -1286,8 +1425,11 @@ class SettingsDialog(QDialog):
                 width: 15px;
                 height: 15px;
                 border-radius: 4px;
-                border: 1.5px solid cyan;
-                background-color: rgba(22, 22, 30, 0.9);
+                border: 1.5px solid rgba(0, 255, 255, 0.7);
+                background-color: rgba(255, 255, 255, 0.07);
+            }
+            QCheckBox::indicator:hover {
+                background-color: rgba(255, 255, 255, 0.16);
             }
             QCheckBox::indicator:checked {
                 background-color: cyan;
@@ -1318,8 +1460,11 @@ class SettingsDialog(QDialog):
                 width: 15px;
                 height: 15px;
                 border-radius: 4px;
-                border: 1.5px solid cyan;
-                background-color: rgba(22, 22, 30, 0.9);
+                border: 1.5px solid rgba(0, 255, 255, 0.7);
+                background-color: rgba(255, 255, 255, 0.07);
+            }
+            QCheckBox::indicator:hover {
+                background-color: rgba(255, 255, 255, 0.16);
             }
             QCheckBox::indicator:checked {
                 background-color: cyan;
@@ -1404,16 +1549,16 @@ class SettingsDialog(QDialog):
         self.btn_features.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_features.setStyleSheet("""
             QPushButton {
-                background-color: rgba(0, 255, 255, 0.12);
+                background-color: rgba(255, 255, 255, 0.07);
                 color: cyan;
-                border: 1px solid rgba(0, 255, 255, 0.4);
+                border: 1px solid rgba(0, 255, 255, 0.45);
                 border-radius: 8px;
                 font-size: 11px;
                 font-weight: 600;
                 padding: 7px 14px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.25);
+                background-color: rgba(255, 255, 255, 0.16);
                 color: #FFFFFF;
                 border-color: cyan;
             }
@@ -1427,9 +1572,9 @@ class SettingsDialog(QDialog):
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
+                background-color: rgba(255, 255, 255, 0.07);
                 color: #D1D5DB;
-                border: 1px solid rgba(255, 255, 255, 0.18);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
                 font-size: 11px;
                 font-weight: 600;
@@ -1464,6 +1609,7 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self.btn_done)
 
         layout.addLayout(btn_layout)
+        main_layout.addWidget(self.card)
 
         # Slider and ComboBox live preview bindings
         self.width_slider.valueChanged.connect(self.width_spin.setValue)
@@ -1619,34 +1765,49 @@ class SettingsDialog(QDialog):
         if rgb_on:
             self.rgb_toggle_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(0, 255, 255, 0.2);
+                    background-color: rgba(0, 255, 255, 0.18);
                     color: cyan;
-                    border: 1.5px solid cyan;
+                    border: 1px solid cyan;
                     border-radius: 6px;
                     font-size: 11px;
                     font-weight: 700;
                     padding: 4px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(0, 255, 255, 0.35);
+                    background-color: rgba(0, 255, 255, 0.32);
+                    color: #FFFFFF;
                 }
             """)
         else:
             self.rgb_toggle_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.08);
+                    background-color: rgba(255, 255, 255, 0.07);
                     color: #A0AEC0;
-                    border: 1.5px solid rgba(255, 255, 255, 0.18);
+                    border: 1px solid rgba(255, 255, 255, 0.16);
                     border-radius: 6px;
                     font-size: 11px;
                     font-weight: 600;
                     padding: 4px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 0.14);
+                    background-color: rgba(255, 255, 255, 0.16);
                     color: #FFFFFF;
                 }
             """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, "_drag_pos"):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def _on_toggle_rgb_clicked(self):
         self.main_window.pill_widget.toggle_rgb_border()
@@ -1754,6 +1915,7 @@ class SettingsDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        apply_acrylic_blur(self)
         self.is_committed = False
         self.pending_username = (getattr(self.main_window, "username", "Host") or "Host")[:15]
         self.initial_snapshot = self.take_snapshot()
@@ -1786,6 +1948,8 @@ class FeaturesShortcutsDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(510, 570)
 
+        apply_acrylic_blur(self)
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(12, 12, 12, 12)
 
@@ -1793,8 +1957,8 @@ class FeaturesShortcutsDialog(QDialog):
         self.card.setObjectName("guide_card")
         self.card.setStyleSheet("""
             QFrame#guide_card {
-                background-color: rgba(16, 16, 22, 0.98);
-                border: 2px solid cyan;
+                background-color: rgba(18, 20, 28, 195);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 16px;
             }
         """)
@@ -1828,8 +1992,8 @@ class FeaturesShortcutsDialog(QDialog):
         btn_x.setToolTip("Close Guide (Esc)")
         btn_x.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.15);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 13px;
                 color: #A0AEC0;
                 font-size: 11px;
@@ -1859,8 +2023,8 @@ class FeaturesShortcutsDialog(QDialog):
         shortcuts_container = QFrame(self.card)
         shortcuts_container.setStyleSheet("""
             QFrame {
-                background-color: rgba(24, 24, 34, 0.85);
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 10px;
                 padding: 4px;
             }
@@ -1915,8 +2079,8 @@ class FeaturesShortcutsDialog(QDialog):
         hl_container = QFrame(self.card)
         hl_container.setStyleSheet("""
             QFrame {
-                background-color: rgba(24, 24, 34, 0.85);
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 10px;
                 padding: 4px;
             }
@@ -1962,21 +2126,21 @@ class FeaturesShortcutsDialog(QDialog):
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close.setStyleSheet("""
             QPushButton {
-                background-color: rgba(0, 255, 255, 0.15);
-                border: 1.5px solid cyan;
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(0, 255, 255, 0.45);
                 border-radius: 8px;
-                color: #FFFFFF;
+                color: cyan;
                 font-family: 'Segoe UI', sans-serif;
                 font-size: 12px;
                 font-weight: 700;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.35);
-                border: 2px solid #5DFEFE;
-                color: cyan;
+                background-color: rgba(0, 255, 255, 0.25);
+                border: 1.5px solid cyan;
+                color: #FFFFFF;
             }
             QPushButton:pressed {
-                background-color: rgba(0, 255, 255, 0.55);
+                background-color: rgba(0, 255, 255, 0.4);
             }
         """)
         self.btn_close.clicked.connect(self.close)
@@ -1988,6 +2152,7 @@ class FeaturesShortcutsDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        apply_acrylic_blur(self)
         self.center_on_screen()
 
     def center_on_screen(self):
@@ -2042,14 +2207,16 @@ class UsernameDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(380, 240)
 
+        apply_acrylic_blur(self)
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         self.card = QFrame(self)
         self.card.setStyleSheet("""
             QFrame {
-                background-color: rgba(18, 18, 26, 0.98);
-                border: 2px solid cyan;
+                background-color: rgba(18, 20, 28, 195);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 16px;
             }
         """)
@@ -2114,8 +2281,8 @@ class UsernameDialog(QDialog):
         self.input_edit.setFixedHeight(36)
         self.input_edit.setStyleSheet("""
             QLineEdit {
-                background-color: rgba(26, 26, 36, 0.95);
-                border: 1.5px solid rgba(0, 255, 255, 0.4);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2126,8 +2293,8 @@ class UsernameDialog(QDialog):
                 selection-color: black;
             }
             QLineEdit:focus {
-                border: 2px solid cyan;
-                background-color: rgba(30, 30, 42, 1.0);
+                border: 1.5px solid cyan;
+                background-color: rgba(255, 255, 255, 0.12);
             }
         """)
         if current_username:
@@ -2150,8 +2317,8 @@ class UsernameDialog(QDialog):
             self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
             self.btn_cancel.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.08);
-                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    background-color: rgba(255, 255, 255, 0.07);
+                    border: 1px solid rgba(255, 255, 255, 0.14);
                     border-radius: 8px;
                     color: #E2E8F0;
                     font-family: 'Segoe UI', sans-serif;
@@ -2172,8 +2339,8 @@ class UsernameDialog(QDialog):
         self.btn_submit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_submit.setStyleSheet("""
             QPushButton {
-                background-color: rgba(0, 255, 255, 0.15);
-                border: 1.5px solid cyan;
+                background-color: rgba(0, 255, 255, 0.18);
+                border: 1px solid cyan;
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2183,7 +2350,7 @@ class UsernameDialog(QDialog):
             }
             QPushButton:hover {
                 background-color: rgba(0, 255, 255, 0.35);
-                border: 2px solid #5DFEFE;
+                border: 1.5px solid #5DFEFE;
                 color: cyan;
             }
             QPushButton:pressed {
@@ -2197,6 +2364,10 @@ class UsernameDialog(QDialog):
         main_layout.addWidget(self.card)
 
         self.chosen_username = ""
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        apply_acrylic_blur(self)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -2296,21 +2467,24 @@ class PillWidget(QFrame):
         self.setFixedSize(DEFAULT_COLLAPSED_WIDTH, DEFAULT_COLLAPSED_HEIGHT)
         self.setStyleSheet("""
             QFrame#pill_frame {
-                background-color: rgba(15, 15, 15, 255);
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(34, 38, 50, 189),
+                    stop:0.18 rgba(22, 25, 34, 165),
+                    stop:1.0 rgba(16, 18, 26, 165));
                 border-top-left-radius: 0px;
                 border-top-right-radius: 0px;
                 border-bottom-left-radius: 16px;
                 border-bottom-right-radius: 16px;
-                border: 2px solid cyan;
+                border: 1.5px solid cyan;
             }
         """)
 
         self.current_mode = self.MODE_COMPACT
         self._current_size = QSize(DEFAULT_COLLAPSED_WIDTH, DEFAULT_COLLAPSED_HEIGHT)
 
-        # Dynamic Audio-Reactive Background Opacity State
-        self.current_bg_alpha = 250.0
-        self.target_bg_alpha = 250.0
+        # Dynamic Audio-Reactive Background Opacity State (obsidian dark frosted glass ~65% opacity)
+        self.current_bg_alpha = 165.0
+        self.target_bg_alpha = 165.0
 
         # RGB Breathing / Moving Neon Border Effect
         self.rgb_border_enabled = True
@@ -2375,21 +2549,21 @@ class PillWidget(QFrame):
         self.btn_dots_menu.setToolTip("Options Menu")
         self.btn_dots_menu.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
-                border: 1px solid transparent;
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
-                color: #A0AEC0;
+                color: #E2E8F0;
                 font-size: 11px;
                 font-weight: bold;
                 padding-bottom: 2px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.22);
-                border: 1px solid rgba(0, 255, 255, 0.6);
+                background-color: rgba(255, 255, 255, 0.18);
+                border: 1px solid cyan;
                 color: cyan;
             }
             QPushButton:pressed {
-                background-color: rgba(0, 255, 255, 0.4);
+                background-color: rgba(0, 255, 255, 0.3);
                 color: #FFFFFF;
             }
         """)
@@ -2423,8 +2597,8 @@ class PillWidget(QFrame):
         self.search_bar.setFixedHeight(32)
         self.search_bar.setStyleSheet("""
             QLineEdit {
-                background-color: rgba(22, 22, 30, 0.95);
-                border: 1.5px solid rgba(255, 255, 255, 0.22);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2435,7 +2609,7 @@ class PillWidget(QFrame):
             }
             QLineEdit:focus {
                 border: 1.5px solid cyan;
-                background-color: rgba(26, 26, 36, 0.98);
+                background-color: rgba(255, 255, 255, 0.14);
             }
         """)
         self.search_bar.returnPressed.connect(self.execute_search)
@@ -2453,8 +2627,8 @@ class PillWidget(QFrame):
         self.browser_combo.setFixedHeight(32)
         self.browser_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(22, 22, 30, 0.95);
-                border: 1.5px solid rgba(255, 255, 255, 0.22);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 8px;
                 color: #EDEDED;
                 font-family: 'Segoe UI', sans-serif;
@@ -2464,14 +2638,16 @@ class PillWidget(QFrame):
                 min-width: 120px;
             }
             QComboBox:hover {
-                border: 1.5px solid cyan;
+                background-color: rgba(255, 255, 255, 0.16);
+                border: 1px solid cyan;
             }
             QComboBox QAbstractItemView {
-                background-color: #1A1A22;
-                border: 1px solid cyan;
+                background-color: rgba(18, 20, 28, 235);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 8px;
                 color: #FFFFFF;
-                selection-background-color: cyan;
-                selection-color: black;
+                selection-background-color: rgba(0, 255, 255, 0.3);
+                selection-color: #FFFFFF;
                 padding: 4px;
             }
         """)
@@ -2483,15 +2659,15 @@ class PillWidget(QFrame):
         self.btn_close_search.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_search.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.18);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(255, 60, 60, 0.35);
+                background-color: rgba(255, 60, 60, 0.45);
                 border: 1px solid #FF3B30;
                 color: #FFFFFF;
             }
@@ -2557,15 +2733,15 @@ class PillWidget(QFrame):
         self.btn_close_ai.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_ai.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.18);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(255, 60, 60, 0.35);
+                background-color: rgba(255, 60, 60, 0.45);
                 border: 1px solid #FF3B30;
                 color: #FFFFFF;
             }
@@ -2599,14 +2775,14 @@ class PillWidget(QFrame):
         self.btn_vis_replay.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_vis_replay.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.2);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 6px;
                 color: #EDEDED;
                 font-size: 10px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.25);
+                background-color: rgba(255, 255, 255, 0.18);
                 border: 1px solid cyan;
                 color: cyan;
             }
@@ -2622,8 +2798,8 @@ class PillWidget(QFrame):
         self.vis_style_combo.setFixedHeight(24)
         self.vis_style_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(22, 22, 30, 0.95);
-                border: 1.5px solid rgba(0, 255, 255, 0.35);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 6px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2633,36 +2809,38 @@ class PillWidget(QFrame):
                 min-width: 125px;
             }
             QComboBox:hover {
-                border: 1.5px solid cyan;
+                background-color: rgba(255, 255, 255, 0.16);
+                border: 1px solid cyan;
             }
             QComboBox QAbstractItemView {
-                background-color: #1A1A22;
-                border: 1px solid cyan;
+                background-color: rgba(18, 20, 28, 235);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 8px;
                 color: #FFFFFF;
-                selection-background-color: cyan;
-                selection-color: black;
+                selection-background-color: rgba(0, 255, 255, 0.3);
+                selection-color: #FFFFFF;
                 padding: 4px;
             }
         """)
         self.vis_style_combo.currentTextChanged.connect(self._on_vis_style_changed)
         vis_h_box.addWidget(self.vis_style_combo)
 
-        # Opaque close button
+        # Translucent glass close button
         self.btn_close_vis = QPushButton("✕", vis_header)
         self.btn_close_vis.setFixedSize(22, 22)
         self.btn_close_vis.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close_vis.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_vis.setStyleSheet("""
             QPushButton {
-                background-color: rgba(30, 30, 42, 0.95);
-                border: 1px solid rgba(255, 255, 255, 0.22);
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: rgba(255, 60, 60, 0.55);
+                background-color: rgba(255, 60, 60, 0.45);
                 border: 1px solid #FF3B30;
                 color: #FFFFFF;
             }
@@ -2716,7 +2894,7 @@ class PillWidget(QFrame):
         if mode == self.MODE_VISUALIZER and self.is_playing:
             self.target_bg_alpha = 135.0
         else:
-            self.target_bg_alpha = 250.0
+            self.target_bg_alpha = 165.0
 
         if not self.rgb_border_enabled:
             self._apply_frame_style()
@@ -2892,11 +3070,13 @@ class PillWidget(QFrame):
         msg_box.setWindowTitle("Browser Not Found")
         msg_box.setText("Please Install the Browser first")
         msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        apply_acrylic_blur(msg_box)
         msg_box.setStyleSheet("""
             QMessageBox {
-                background-color: #121218;
-                border: 1.5px solid rgba(255, 60, 60, 0.8);
-                border-radius: 12px;
+                background-color: rgba(18, 20, 28, 220);
+                border: 1px solid rgba(255, 60, 60, 0.6);
+                border-radius: 14px;
             }
             QLabel {
                 color: #EDEDED;
@@ -2906,8 +3086,8 @@ class PillWidget(QFrame):
                 padding: 8px;
             }
             QPushButton {
-                background-color: rgba(255, 60, 60, 0.25);
-                border: 1.5px solid #FF3B30;
+                background-color: rgba(255, 255, 255, 0.07);
+                border: 1px solid rgba(255, 60, 60, 0.6);
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2917,8 +3097,9 @@ class PillWidget(QFrame):
                 min-width: 70px;
             }
             QPushButton:hover {
-                background-color: #FF3B30;
-                color: #000000;
+                background-color: rgba(255, 60, 60, 0.55);
+                border: 1px solid #FF3B30;
+                color: #FFFFFF;
             }
         """)
 
@@ -3015,11 +3196,11 @@ class PillWidget(QFrame):
 
         # Dynamic Audio-Reactive Background Transparency:
         # In visualizer mode with active playback, lower alpha to ~135 so desktop/media subtly peeks through;
-        # when audio is silent or stopped, revert to solid dark shade (~250) for crisp readability.
+        # when audio is silent or stopped, revert to obsidian dark frosted glass (~165) for crisp readability.
         if self.current_mode == self.MODE_VISUALIZER and is_playing:
             self.target_bg_alpha = 135.0
         else:
-            self.target_bg_alpha = 250.0
+            self.target_bg_alpha = 165.0
 
         if not self.rgb_border_enabled:
             self._apply_frame_style()
@@ -3045,9 +3226,10 @@ class PillWidget(QFrame):
         self.show_custom_context_menu(pos)
 
     def _apply_frame_style(self):
-        """Applies dynamic frame background transparency and RGB border styling."""
+        """Applies dynamic frosted-glass background transparency and RGB border styling."""
         self.current_bg_alpha += (self.target_bg_alpha - self.current_bg_alpha) * 0.22
         bg_alpha = int(self.current_bg_alpha)
+        top_sheen_alpha = int(min(255, bg_alpha + 24))
 
         if self.rgb_border_enabled:
             t = time.time()
@@ -3070,15 +3252,18 @@ class PillWidget(QFrame):
             y2 = 0.5 + 0.5 * math.sin(theta)
 
             border_str = (
-                f"2px solid qlineargradient(x1:{x1:.2f}, y1:{y1:.2f}, x2:{x2:.2f}, y2:{y2:.2f}, "
+                f"1.5px solid qlineargradient(x1:{x1:.2f}, y1:{y1:.2f}, x2:{x2:.2f}, y2:{y2:.2f}, "
                 f"stop:0 {c1.name()}, stop:0.5 {c2.name()}, stop:1 {c3.name()})"
             )
         else:
-            border_str = "2px solid cyan"
+            border_str = "1px solid rgba(255, 255, 255, 45)"
 
         self.setStyleSheet(f"""
             QFrame#pill_frame {{
-                background-color: rgba(15, 15, 15, {bg_alpha});
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(34, 38, 50, {top_sheen_alpha}),
+                    stop:0.18 rgba(22, 25, 34, {bg_alpha}),
+                    stop:1.0 rgba(16, 18, 26, {bg_alpha}));
                 border-top-left-radius: 0px;
                 border-top-right-radius: 0px;
                 border-bottom-left-radius: 16px;
@@ -3155,11 +3340,13 @@ class PillWidget(QFrame):
 
     def show_custom_context_menu(self, global_pos):
         menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        apply_acrylic_blur(menu)
         menu.setStyleSheet("""
             QMenu {
-                background-color: rgba(18, 18, 24, 250);
-                border: 1.5px solid cyan;
-                border-radius: 10px;
+                background-color: rgba(18, 20, 28, 195);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 14px;
                 padding: 6px;
                 color: #EDEDED;
                 font-family: 'Segoe UI', sans-serif;
@@ -3168,10 +3355,11 @@ class PillWidget(QFrame):
             }
             QMenu::item {
                 padding: 8px 24px;
-                border-radius: 6px;
+                border-radius: 8px;
+                background-color: transparent;
             }
             QMenu::item:selected {
-                background-color: rgba(0, 255, 255, 0.25);
+                background-color: rgba(255, 255, 255, 0.12);
                 color: cyan;
             }
             QMenu::indicator {
@@ -3191,7 +3379,7 @@ class PillWidget(QFrame):
             }
             QMenu::separator {
                 height: 1px;
-                background: rgba(255, 255, 255, 0.15);
+                background: rgba(255, 255, 255, 0.12);
                 margin: 4px 8px;
             }
         """)
@@ -3668,6 +3856,7 @@ class NotchMainWindow(QMainWindow):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        apply_acrylic_blur(self)
 
         # Place the cyan-bordered QFrame inside it with a strict setFixedSize(230, 40)
         self.pill_widget = PillWidget(self)
@@ -3737,6 +3926,10 @@ class NotchMainWindow(QMainWindow):
 
         # Separate fullscreen symbiote intro overlay
         self.intro_overlay = SymbioteAnimationOverlay(self)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        apply_acrylic_blur(self)
 
     def animate_to_size(self, target_size: QSize):
         """Smoothly animates the notch to the specified target size."""

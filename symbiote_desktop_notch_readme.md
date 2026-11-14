@@ -14,10 +14,11 @@ The Symbiote Desktop Notch transforms your desktop experience by introducing a s
    * Features a synced cinematic welcome message followed by a shattering transition into the Venom/Carnage symbiote border-crawl animation.
    * Your username seamlessly integrates into the main compact notch alongside a live IST clock.
 
-2. **Dynamic RGB Breathing Border & UI Customization:**
-   * A smooth, continuously moving neon RGB glow surrounding the notch frame (enabled by default).
+2. **Dynamic RGB Breathing Border & Dark Glassmorphism UI:**
+   * **Real Windows Frosted-Glass Blur (Acrylic / DWM Blur Behind):** Utilizes native Windows Desktop Window Manager (DWM) Acrylic and blur composition attributes (`SetWindowCompositionAttribute` / `DwmSetWindowAttribute`) to naturally blur background wallpapers and active desktop windows behind the HUD.
+   * **Obsidian Glass Surface & Specular Rim:** Features a semi-transparent dark obsidian glass fill (`rgba(16, 18, 26, 165)` — ~65% opacity) paired with an inner top-to-bottom specular sheen gradient and a delicate 1px frosted rim (`rgba(255, 255, 255, 45)`) when RGB border is off, or glowing neon RGB illumination when active.
    * **Flush Top-Edge Hardware Notch:** Default sleek dimensions (190 px wide by 32 px high) sitting flush at `Y = 0` against the monitor's top bezel with flat 0px top corners and smoothly rounded 16px bottom corners.
-   * **UI Settings Dialog:** Accessible via the simplified 3-dots menu to customize your Username, toggle RGB lights, configure Auto-Start (1m Delay), launch the Features & Shortcuts guide, and adjust Base Width, Base Height, Y-Position, and Visualizer Style.
+   * **Frosted-Glass Dialogs & Translucent Glass Pills:** UI Settings, Features & Shortcuts guide, Username prompt, 3-dots menu, and buttons/sliders are styled with matching dark frosted-glass cards (`rgba(18, 20, 28, 195)`) and translucent glass pills (`rgba(255, 255, 255, 0.07)`) that brighten smoothly on hover (`rgba(255, 255, 255, 0.16)`).
    * **Safe Commit/Rollback Controls:** Clicking **Done** permanently saves your customized settings and creates/removes the startup task, while clicking the close button (**X**) or pressing `Esc` safely discards unsaved changes and reverts to your previous snapshot.
 
 3. **Smart Auto-Start (1-Minute Boot Delay):**

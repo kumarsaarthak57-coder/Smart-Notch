@@ -1,8 +1,9 @@
 {
-    "username": "venom",
-    "rgb_border": true,
-    "base_width": 190,
-    "base_height": 32,
-    "top_offset": 0,
-    "visualizer_style": "Waveform"
+    "username": "CommittedHost",
+    "rgb_border": false,
+    "autostart": false,
+    "base_width": 320,
+    "base_height": 55,
+    "top_offset": 18,
+    "visualizer_style": "Matrix Rain"
 }
