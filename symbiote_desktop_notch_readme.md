@@ -48,6 +48,10 @@ The notch uses `Alt + Arrow` combinations so it never interferes with browser sc
 | **Right-Click** | Opens the quick context menu (`Replay Intro Animation`, `Exit`). |
 | **`Esc` Key** | Closes active pop-up dialogs (discarding unsaved changes) or exits the notch when focused. |
 
+
+<img width="545" height="137" alt="Screenshot 2026-11-14 140145" src="https://github.com/user-attachments/assets/17a37ed1-00d1-481d-ba95-d16b34f78474" />
+
+
 ## 🛡️ Privacy & Storage
 
 * User data and UI configurations are stored locally in a decentralized user directory (`os.path.expanduser('~')`) and excluded from version control via `.gitignore`.
