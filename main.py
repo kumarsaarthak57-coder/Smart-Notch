@@ -25,97 +25,13 @@ def get_current_ist_time() -> str:
 
 def apply_acrylic_blur(window) -> bool:
     """
-    Applies Windows DWM Acrylic/Blur-Behind (SetWindowCompositionAttribute / DwmSetWindowAttribute)
-    to frameless translucent Qt windows, allowing wallpapers and desktop windows to blur naturally
-    behind the translucent frosted-glass surface.
-    Safe across Windows 10/11 and a harmless no-op on Linux / non-Windows platforms.
+    DWM blur calls (SetWindowCompositionAttribute / DwmEnableBlurBehindWindow)
+    conflict with WA_TranslucentBackground and rounded QPainterPath shapes on Windows 11,
+    producing black rectangular corner clipping artifacts.
+    Window styling is instead handled purely via Qt's true layered Glassmorphism in QPainter / QSS.
+    Safe across Windows 10/11 and Linux / non-Windows platforms.
     """
-    if platform.system() != "Windows":
-        return False
-
-    try:
-        if window is None:
-            return False
-        # Window must have a valid native OS handle
-        hwnd = int(window.winId())
-        if not hwnd:
-            return False
-
-        applied = False
-
-        # 1. Primary: Windows 10/11 SetWindowCompositionAttribute (WCA_ACCENT_POLICY)
-        try:
-            class ACCENT_POLICY(ctypes.Structure):
-                _fields_ = [
-                    ('AccentState', ctypes.c_int),
-                    ('AccentFlags', ctypes.c_int),
-                    ('GradientColor', ctypes.c_uint32),
-                    ('AnimationId', ctypes.c_int)
-                ]
-
-            class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
-                _fields_ = [
-                    ('Attribute', ctypes.c_int),
-                    ('Data', ctypes.POINTER(ACCENT_POLICY)),
-                    ('SizeOfData', ctypes.c_size_t)
-                ]
-
-            policy = ACCENT_POLICY()
-            policy.AccentState = 4  # ACCENT_ENABLE_ACRYLICBLURBEHIND (or 3 for blur)
-            policy.AccentFlags = 2  # Draw all borders
-            policy.GradientColor = 0x66181410  # Translucent dark obsidian tint
-            policy.AnimationId = 0
-
-            data = WINDOWCOMPOSITIONATTRIBDATA()
-            data.Attribute = 19  # WCA_ACCENT_POLICY
-            data.Data = ctypes.pointer(policy)
-            data.SizeOfData = ctypes.sizeof(policy)
-
-            set_comp_attr = getattr(ctypes.windll.user32, "SetWindowCompositionAttribute", None)
-            if set_comp_attr:
-                set_comp_attr.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWCOMPOSITIONATTRIBDATA)]
-                set_comp_attr.restype = ctypes.c_int
-                res = set_comp_attr(wintypes.HWND(hwnd), ctypes.byref(data))
-                if res != 0:
-                    applied = True
-        except Exception:
-            pass
-
-        # 2. Windows 11 Build 22000+ DwmSetWindowAttribute (DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_TRANSIENTWINDOW = 3)
-        try:
-            dwm_set = getattr(ctypes.windll.dwmapi, "DwmSetWindowAttribute", None)
-            if dwm_set:
-                backdrop_type = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW (Acrylic)
-                dwm_set(wintypes.HWND(hwnd), ctypes.c_ulong(38), ctypes.byref(backdrop_type), ctypes.sizeof(backdrop_type))
-                applied = True
-        except Exception:
-            pass
-
-        # 3. Fallback: DwmEnableBlurBehindWindow
-        try:
-            dwm_blur = getattr(ctypes.windll.dwmapi, "DwmEnableBlurBehindWindow", None)
-            if dwm_blur:
-                class DWM_BLURBEHIND(ctypes.Structure):
-                    _fields_ = [
-                        ('dwFlags', ctypes.c_ulong),
-                        ('fEnable', ctypes.c_int),
-                        ('hRgnBlur', ctypes.c_void_p),
-                        ('fTransitionOnMaximized', ctypes.c_int)
-                    ]
-                bb = DWM_BLURBEHIND()
-                bb.dwFlags = 1  # DWM_BB_ENABLE
-                bb.fEnable = 1
-                bb.hRgnBlur = None
-                bb.fTransitionOnMaximized = 0
-                dwm_blur(wintypes.HWND(hwnd), ctypes.byref(bb))
-                applied = True
-        except Exception:
-            pass
-
-        return applied
-    except Exception as ex:
-        print(f"[DEBUG] Window blur application note: {ex}")
-        return False
+    return False
 
 # --- Local User Storage Configuration ---
 def get_user_data_filepath() -> str:
@@ -854,6 +770,9 @@ class CircularAIButton(QWidget):
         self.name = name
         self.icon_symbol = icon_symbol
         self.accent_color = accent_color
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(58, 54)
 
@@ -868,8 +787,8 @@ class CircularAIButton(QWidget):
         self.button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.button.setStyleSheet(f"""
             QPushButton {{
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 17px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -877,7 +796,7 @@ class CircularAIButton(QWidget):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: rgba(255, 255, 255, 0.16);
+                background-color: rgba(255, 255, 255, 0.18);
                 border: 1.5px solid {accent_color};
             }}
             QPushButton:focus {{
@@ -1052,7 +971,8 @@ class AudioVisualizerWidget(QWidget):
     def __init__(self, pill_widget, parent=None):
         super().__init__(parent)
         self.pill_widget = pill_widget
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedHeight(66)
         self.matrix_drops = [float((i * 11) % 66) for i in range(32)]
@@ -1188,7 +1108,8 @@ class MiniVisualizerWidget(QWidget):
     def __init__(self, pill_widget, parent=None):
         super().__init__(parent)
         self.pill_widget = pill_widget
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setFixedSize(18, 12)
 
     def paintEvent(self, event):
@@ -1232,7 +1153,8 @@ class SettingsDialog(QDialog):
         self.main_window = main_window
         self.setWindowTitle("UI Settings")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setFixedWidth(430)
 
         self.is_committed = False
@@ -1253,8 +1175,8 @@ class SettingsDialog(QDialog):
                 border: none;
             }
             QSpinBox {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
                 color: #FFFFFF;
                 font-size: 11px;
@@ -1262,7 +1184,7 @@ class SettingsDialog(QDialog):
                 min-width: 65px;
             }
             QSpinBox:hover, QSpinBox:focus {
-                background-color: rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.16);
                 border: 1px solid cyan;
             }
             QSlider::groove:horizontal {
@@ -1286,8 +1208,8 @@ class SettingsDialog(QDialog):
                 background: cyan;
             }
             QComboBox {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
                 color: #FFFFFF;
                 font-size: 11px;
@@ -1299,11 +1221,11 @@ class SettingsDialog(QDialog):
                 border: 1px solid cyan;
             }
             QComboBox QAbstractItemView {
-                background-color: rgba(18, 20, 28, 230);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: #1A1F2E;
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 8px;
                 color: #FFFFFF;
-                selection-background-color: rgba(0, 255, 255, 0.3);
+                selection-background-color: rgba(56, 189, 248, 0.3);
                 selection-color: #FFFFFF;
                 padding: 4px;
             }
@@ -1314,11 +1236,12 @@ class SettingsDialog(QDialog):
 
         self.card = QFrame(self)
         self.card.setObjectName("settings_card")
+        self.card.setAutoFillBackground(False)
         self.card.setStyleSheet("""
             QFrame#settings_card {
-                background-color: rgba(18, 20, 28, 195);
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                border-radius: 16px;
+                background-color: #12151E;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 14px;
             }
         """)
         layout = QVBoxLayout(self.card)
@@ -1337,8 +1260,8 @@ class SettingsDialog(QDialog):
         self.btn_x.setToolTip("Close Settings (Esc)")
         self.btn_x.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 13px;
                 color: #A0AEC0;
                 font-size: 11px;
@@ -1378,7 +1301,7 @@ class SettingsDialog(QDialog):
         self.btn_change_username.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_change_username.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
+                background-color: rgba(255, 255, 255, 0.08);
                 color: cyan;
                 border: 1px solid rgba(0, 255, 255, 0.45);
                 border-radius: 6px;
@@ -1461,7 +1384,7 @@ class SettingsDialog(QDialog):
                 height: 15px;
                 border-radius: 4px;
                 border: 1.5px solid rgba(0, 255, 255, 0.7);
-                background-color: rgba(255, 255, 255, 0.07);
+                background-color: rgba(255, 255, 255, 0.08);
             }
             QCheckBox::indicator:hover {
                 background-color: rgba(255, 255, 255, 0.16);
@@ -1549,7 +1472,7 @@ class SettingsDialog(QDialog):
         self.btn_features.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_features.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
+                background-color: rgba(255, 255, 255, 0.08);
                 color: cyan;
                 border: 1px solid rgba(0, 255, 255, 0.45);
                 border-radius: 8px;
@@ -1572,9 +1495,9 @@ class SettingsDialog(QDialog):
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
+                background-color: rgba(255, 255, 255, 0.08);
                 color: #D1D5DB;
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 8px;
                 font-size: 11px;
                 font-weight: 600;
@@ -1583,7 +1506,7 @@ class SettingsDialog(QDialog):
             QPushButton:hover {
                 background-color: rgba(255, 255, 255, 0.16);
                 color: #FFFFFF;
-                border-color: rgba(255, 255, 255, 0.32);
+                border-color: rgba(255, 255, 255, 0.35);
             }
         """)
         self.btn_cancel.clicked.connect(self.reject)
@@ -1767,7 +1690,7 @@ class SettingsDialog(QDialog):
                 QPushButton {
                     background-color: rgba(0, 255, 255, 0.18);
                     color: cyan;
-                    border: 1px solid cyan;
+                    border: 1.5px solid cyan;
                     border-radius: 6px;
                     font-size: 11px;
                     font-weight: 700;
@@ -1781,9 +1704,9 @@ class SettingsDialog(QDialog):
         else:
             self.rgb_toggle_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.07);
+                    background-color: rgba(255, 255, 255, 0.08);
                     color: #A0AEC0;
-                    border: 1px solid rgba(255, 255, 255, 0.16);
+                    border: 1px solid rgba(255, 255, 255, 0.22);
                     border-radius: 6px;
                     font-size: 11px;
                     font-weight: 600;
@@ -1909,9 +1832,15 @@ class SettingsDialog(QDialog):
             self.autostart_checkbox.blockSignals(False)
 
     def _on_features_clicked(self):
-        """Opens the sleek, dark-themed Features & Shortcuts guide dialog without closing UI Settings or the main notch."""
-        dlg = FeaturesShortcutsDialog(self)
-        dlg.exec()
+        """
+        Closes UI Settings and opens Features & Shortcuts guide
+        so two pop-ups never stack or overlap on top of each other.
+        """
+        self.close()
+        if hasattr(self.main_window, "pill_widget") and hasattr(self.main_window.pill_widget, "open_features_guide"):
+            self.main_window.pill_widget.open_features_guide()
+        elif hasattr(self.main_window, "open_features_guide"):
+            self.main_window.open_features_guide()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1938,6 +1867,7 @@ class FeaturesShortcutsDialog(QDialog):
     Sleek, dark-themed frameless guide dialog matching the Symbiote aesthetic:
     - Displays keyboard controls (Alt + Arrow combinations)
     - Highlights key features (RGB border, decentralized storage, always-on-top HUD)
+    - Solid dark slate background (#12151E) to eliminate background bleed-through
     - Centered on screen with clean Close button and Esc key support
     - Closing never terminates the main notch application
     """
@@ -1945,33 +1875,34 @@ class FeaturesShortcutsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Features & Shortcuts")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(510, 570)
-
-        apply_acrylic_blur(self)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setMinimumWidth(480)
+        self.setFixedWidth(520)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(12, 12, 12, 12)
 
         self.card = QFrame(self)
         self.card.setObjectName("guide_card")
+        self.card.setAutoFillBackground(False)
         self.card.setStyleSheet("""
             QFrame#guide_card {
-                background-color: rgba(18, 20, 28, 195);
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                border-radius: 16px;
+                background-color: #12151E;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 14px;
             }
         """)
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(24, 20, 24, 20)
-        card_layout.setSpacing(13)
+        card_layout.setSpacing(12)
 
         # Header
         header_layout = QHBoxLayout()
         header_layout.setSpacing(10)
 
         icon_label = QLabel("⚡", self.card)
-        icon_label.setStyleSheet("color: cyan; font-size: 20px; background: transparent; border: none;")
+        icon_label.setStyleSheet("color: #38BDF8; font-size: 20px; background: transparent; border: none;")
         header_layout.addWidget(icon_label)
 
         title_label = QLabel("Features & Shortcuts", self.card)
@@ -1992,8 +1923,8 @@ class FeaturesShortcutsDialog(QDialog):
         btn_x.setToolTip("Close Guide (Esc)")
         btn_x.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 13px;
                 color: #A0AEC0;
                 font-size: 11px;
@@ -2012,26 +1943,26 @@ class FeaturesShortcutsDialog(QDialog):
 
         # Subtitle
         sub_label = QLabel("HUD Controls & Modular Sub-Notch Guide", self.card)
-        sub_label.setStyleSheet("color: #718096; font-size: 11px; font-weight: 500; background: transparent; border: none;")
+        sub_label.setStyleSheet("color: #94A3B8; font-size: 11px; font-weight: 500; background: transparent; border: none;")
         card_layout.addWidget(sub_label)
 
         # 1. Keyboard Shortcuts Section
         sec1_title = QLabel("⌨️  KEYBOARD CONTROLS", self.card)
-        sec1_title.setStyleSheet("color: cyan; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
+        sec1_title.setStyleSheet("color: #38BDF8; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
         card_layout.addWidget(sec1_title)
 
         shortcuts_container = QFrame(self.card)
         shortcuts_container.setStyleSheet("""
             QFrame {
-                background-color: rgba(255, 255, 255, 0.05);
+                background-color: #1A1F2E;
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 10px;
                 padding: 4px;
             }
         """)
         sc_layout = QVBoxLayout(shortcuts_container)
-        sc_layout.setContentsMargins(10, 8, 10, 8)
-        sc_layout.setSpacing(8)
+        sc_layout.setContentsMargins(14, 12, 14, 12)
+        sc_layout.setSpacing(10)
 
         shortcuts = [
             ("Alt + ↑", "Main Compact Notch", "Username & live IST clock display."),
@@ -2044,26 +1975,27 @@ class FeaturesShortcutsDialog(QDialog):
             row = QHBoxLayout()
             row.setSpacing(12)
             k_badge = QLabel(key_combo)
-            k_badge.setFixedWidth(70)
+            k_badge.setFixedWidth(78)
             k_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             k_badge.setStyleSheet("""
-                background-color: rgba(0, 255, 255, 0.12);
-                border: 1px solid cyan;
+                background-color: rgba(56, 189, 248, 0.14);
+                border: 1.5px solid #38BDF8;
                 border-radius: 6px;
-                color: cyan;
+                color: #38BDF8;
                 font-family: 'Segoe UI', 'Consolas', monospace;
                 font-size: 11px;
                 font-weight: 700;
-                padding: 3px 4px;
+                padding: 4px 6px;
             """)
             row.addWidget(k_badge)
 
             info_col = QVBoxLayout()
-            info_col.setSpacing(1)
+            info_col.setSpacing(2)
             name_lbl = QLabel(name)
-            name_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+            name_lbl.setStyleSheet("color: #FFFFFF; font-size: 12px; font-weight: 600; background: transparent; border: none;")
             desc_lbl = QLabel(desc)
-            desc_lbl.setStyleSheet("color: #A0AEC0; font-size: 10px; background: transparent; border: none;")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setStyleSheet("color: #CBD5E1; font-size: 11px; background: transparent; border: none; padding-top: 1px; padding-bottom: 2px;")
             info_col.addWidget(name_lbl)
             info_col.addWidget(desc_lbl)
             row.addLayout(info_col)
@@ -2073,24 +2005,24 @@ class FeaturesShortcutsDialog(QDialog):
 
         # 2. Key Highlights Section
         sec2_title = QLabel("✨  KEY HIGHLIGHTS", self.card)
-        sec2_title.setStyleSheet("color: cyan; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
+        sec2_title.setStyleSheet("color: #38BDF8; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
         card_layout.addWidget(sec2_title)
 
         hl_container = QFrame(self.card)
         hl_container.setStyleSheet("""
             QFrame {
-                background-color: rgba(255, 255, 255, 0.05);
+                background-color: #1A1F2E;
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 10px;
                 padding: 4px;
             }
         """)
         hl_layout = QVBoxLayout(hl_container)
-        hl_layout.setContentsMargins(10, 8, 10, 8)
-        hl_layout.setSpacing(6)
+        hl_layout.setContentsMargins(14, 12, 14, 12)
+        hl_layout.setSpacing(10)
 
         highlights = [
-            ("🌈", "Customizable RGB Breathing Border", "Dynamic animated neon glow, toggleable directly from the 3-dots menu."),
+            ("🌈", "Customizable RGB Breathing Border", "Dynamic animated neon glow, toggleable directly from the UI Settings dialog."),
             ("🚀", "Auto-Start (1-Min Delay)", "Automatically launches the notch 1 minute after login via Task Scheduler or Startup."),
             ("🛡️", "Local Decentralized Username Storage", "Stored privately in local user directory (~/.venom_notch_user.txt) with zero telemetry."),
             ("📌", "Always-on-Top HUD Design", "Ultra-lightweight Windows 11 desktop companion with zero hardware bloat.")
@@ -2100,15 +2032,16 @@ class FeaturesShortcutsDialog(QDialog):
             h_row = QHBoxLayout()
             h_row.setSpacing(10)
             h_ico = QLabel(icon)
-            h_ico.setStyleSheet("font-size: 14px; background: transparent; border: none;")
+            h_ico.setStyleSheet("font-size: 15px; background: transparent; border: none;")
             h_row.addWidget(h_ico)
 
             h_text_col = QVBoxLayout()
-            h_text_col.setSpacing(1)
+            h_text_col.setSpacing(2)
             h_title = QLabel(title_text)
-            h_title.setStyleSheet("color: #E2E8F0; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+            h_title.setStyleSheet("color: #FFFFFF; font-size: 12px; font-weight: 600; background: transparent; border: none;")
             h_desc = QLabel(detail)
-            h_desc.setStyleSheet("color: #A0AEC0; font-size: 10px; background: transparent; border: none;")
+            h_desc.setWordWrap(True)
+            h_desc.setStyleSheet("color: #CBD5E1; font-size: 11px; background: transparent; border: none; padding-top: 1px; padding-bottom: 2px;")
             h_text_col.addWidget(h_title)
             h_text_col.addWidget(h_desc)
             h_row.addLayout(h_text_col)
@@ -2122,25 +2055,25 @@ class FeaturesShortcutsDialog(QDialog):
 
         self.btn_close = QPushButton("Close")
         self.btn_close.setFixedWidth(130)
-        self.btn_close.setFixedHeight(32)
+        self.btn_close.setFixedHeight(34)
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(0, 255, 255, 0.45);
+                background-color: rgba(56, 189, 248, 0.12);
+                border: 1px solid #38BDF8;
                 border-radius: 8px;
-                color: cyan;
+                color: #38BDF8;
                 font-family: 'Segoe UI', sans-serif;
                 font-size: 12px;
                 font-weight: 700;
             }
             QPushButton:hover {
-                background-color: rgba(0, 255, 255, 0.25);
-                border: 1.5px solid cyan;
+                background-color: rgba(56, 189, 248, 0.28);
+                border: 1.5px solid #38BDF8;
                 color: #FFFFFF;
             }
             QPushButton:pressed {
-                background-color: rgba(0, 255, 255, 0.4);
+                background-color: rgba(56, 189, 248, 0.45);
             }
         """)
         self.btn_close.clicked.connect(self.close)
@@ -2152,8 +2085,13 @@ class FeaturesShortcutsDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        apply_acrylic_blur(self)
+        self.adjustSize()
         self.center_on_screen()
+
+    def closeEvent(self, event):
+        if hasattr(self.parent(), "features_dialog") and self.parent().features_dialog is self:
+            self.parent().features_dialog = None
+        event.accept()
 
     def center_on_screen(self):
         screen = QApplication.primaryScreen()
@@ -2204,7 +2142,8 @@ class UsernameDialog(QDialog):
         self.allow_cancel = allow_cancel
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setFixedSize(380, 240)
 
         apply_acrylic_blur(self)
@@ -2213,11 +2152,12 @@ class UsernameDialog(QDialog):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         self.card = QFrame(self)
+        self.card.setAutoFillBackground(False)
         self.card.setStyleSheet("""
             QFrame {
-                background-color: rgba(18, 20, 28, 195);
-                border: 1px solid rgba(255, 255, 255, 0.14);
-                border-radius: 16px;
+                background-color: #12151E;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 14px;
             }
         """)
         card_layout = QVBoxLayout(self.card)
@@ -2281,8 +2221,8 @@ class UsernameDialog(QDialog):
         self.input_edit.setFixedHeight(36)
         self.input_edit.setStyleSheet("""
             QLineEdit {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2294,7 +2234,7 @@ class UsernameDialog(QDialog):
             }
             QLineEdit:focus {
                 border: 1.5px solid cyan;
-                background-color: rgba(255, 255, 255, 0.12);
+                background-color: rgba(255, 255, 255, 0.16);
             }
         """)
         if current_username:
@@ -2317,8 +2257,8 @@ class UsernameDialog(QDialog):
             self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
             self.btn_cancel.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.07);
-                    border: 1px solid rgba(255, 255, 255, 0.14);
+                    background-color: rgba(255, 255, 255, 0.08);
+                    border: 1px solid rgba(255, 255, 255, 0.22);
                     border-radius: 8px;
                     color: #E2E8F0;
                     font-family: 'Segoe UI', sans-serif;
@@ -2465,26 +2405,16 @@ class PillWidget(QFrame):
 
         self.setObjectName("pill_frame")
         self.setFixedSize(DEFAULT_COLLAPSED_WIDTH, DEFAULT_COLLAPSED_HEIGHT)
-        self.setStyleSheet("""
-            QFrame#pill_frame {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(34, 38, 50, 189),
-                    stop:0.18 rgba(22, 25, 34, 165),
-                    stop:1.0 rgba(16, 18, 26, 165));
-                border-top-left-radius: 0px;
-                border-top-right-radius: 0px;
-                border-bottom-left-radius: 16px;
-                border-bottom-right-radius: 16px;
-                border: 1.5px solid cyan;
-            }
-        """)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("QFrame#pill_frame { background: transparent; border: none; }")
 
         self.current_mode = self.MODE_COMPACT
         self._current_size = QSize(DEFAULT_COLLAPSED_WIDTH, DEFAULT_COLLAPSED_HEIGHT)
 
-        # Dynamic Audio-Reactive Background Opacity State (obsidian dark frosted glass ~65% opacity)
-        self.current_bg_alpha = 165.0
-        self.target_bg_alpha = 165.0
+        # Dynamic Audio-Reactive Background Opacity State (smoked glass 145 alpha ~57% opacity)
+        self.current_bg_alpha = 145.0
+        self.target_bg_alpha = 145.0
 
         # RGB Breathing / Moving Neon Border Effect
         self.rgb_border_enabled = True
@@ -2506,6 +2436,8 @@ class PillWidget(QFrame):
         # 1. COMPACT PANEL (Main Pill: IST Clock, Status, 15-Char Username, Mini Vis, 3-Dots Menu)
         # =====================================================================
         self.compact_panel = QWidget(self)
+        self.compact_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.compact_panel.setAutoFillBackground(False)
         self.compact_panel.setStyleSheet("background: transparent; border: none;")
         self.compact_layout = QHBoxLayout(self.compact_panel)
         self.compact_layout.setContentsMargins(8, 0, 8, 0)
@@ -2549,8 +2481,8 @@ class PillWidget(QFrame):
         self.btn_dots_menu.setToolTip("Options Menu")
         self.btn_dots_menu.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #E2E8F0;
                 font-size: 11px;
@@ -2582,6 +2514,8 @@ class PillWidget(QFrame):
         # 2. SEARCH PANEL (Dedicated Smart Search Sub-Notch)
         # =====================================================================
         self.search_panel = QWidget(self)
+        self.search_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.search_panel.setAutoFillBackground(False)
         self.search_panel.setStyleSheet("background: transparent; border: none;")
         self.search_layout = QHBoxLayout(self.search_panel)
         self.search_layout.setContentsMargins(14, 4, 14, 4)
@@ -2597,8 +2531,8 @@ class PillWidget(QFrame):
         self.search_bar.setFixedHeight(32)
         self.search_bar.setStyleSheet("""
             QLineEdit {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2609,7 +2543,7 @@ class PillWidget(QFrame):
             }
             QLineEdit:focus {
                 border: 1.5px solid cyan;
-                background-color: rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.16);
             }
         """)
         self.search_bar.returnPressed.connect(self.execute_search)
@@ -2627,8 +2561,8 @@ class PillWidget(QFrame):
         self.browser_combo.setFixedHeight(32)
         self.browser_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #EDEDED;
                 font-family: 'Segoe UI', sans-serif;
@@ -2642,8 +2576,8 @@ class PillWidget(QFrame):
                 border: 1px solid cyan;
             }
             QComboBox QAbstractItemView {
-                background-color: rgba(18, 20, 28, 235);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(20, 24, 34, 235);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #FFFFFF;
                 selection-background-color: rgba(0, 255, 255, 0.3);
@@ -2659,8 +2593,8 @@ class PillWidget(QFrame):
         self.btn_close_search.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_search.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
@@ -2679,6 +2613,8 @@ class PillWidget(QFrame):
         # 3. AI HUB PANEL (Dedicated AI Hub Sub-Notch)
         # =====================================================================
         self.ai_hub_panel = QWidget(self)
+        self.ai_hub_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.ai_hub_panel.setAutoFillBackground(False)
         self.ai_hub_panel.setStyleSheet("background: transparent; border: none;")
         self.ai_hub_layout = QHBoxLayout(self.ai_hub_panel)
         self.ai_hub_layout.setContentsMargins(16, 2, 16, 2)
@@ -2686,6 +2622,8 @@ class PillWidget(QFrame):
 
         # Left header container (balanced width with right container for pixel-perfect centering)
         left_container = QWidget(self.ai_hub_panel)
+        left_container.setAutoFillBackground(False)
+        left_container.setStyleSheet("background: transparent; border: none;")
         left_container.setFixedWidth(80)
         left_layout = QHBoxLayout(left_container)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -2700,6 +2638,8 @@ class PillWidget(QFrame):
 
         # Center container hosting the 3 circular AI badges
         center_container = QWidget(self.ai_hub_panel)
+        center_container.setAutoFillBackground(False)
+        center_container.setStyleSheet("background: transparent; border: none;")
         center_layout = QHBoxLayout(center_container)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(18)
@@ -2722,6 +2662,8 @@ class PillWidget(QFrame):
 
         # Right container (80px width matching left container for symmetry)
         right_container = QWidget(self.ai_hub_panel)
+        right_container.setAutoFillBackground(False)
+        right_container.setStyleSheet("background: transparent; border: none;")
         right_container.setFixedWidth(80)
         right_layout = QHBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -2733,8 +2675,8 @@ class PillWidget(QFrame):
         self.btn_close_ai.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_ai.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
@@ -2754,12 +2696,15 @@ class PillWidget(QFrame):
         # 4. VISUALIZER PANEL (Dedicated Visualizer Sub-Notch with Style Selector)
         # =====================================================================
         self.visualizer_panel = QWidget(self)
+        self.visualizer_panel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.visualizer_panel.setAutoFillBackground(False)
         self.visualizer_panel.setStyleSheet("background: transparent; border: none;")
         self.visualizer_layout = QVBoxLayout(self.visualizer_panel)
         self.visualizer_layout.setContentsMargins(16, 8, 16, 8)
         self.visualizer_layout.setSpacing(6)
 
         vis_header = QWidget(self.visualizer_panel)
+        vis_header.setAutoFillBackground(False)
         vis_header.setStyleSheet("background: transparent; border: none;")
         vis_h_box = QHBoxLayout(vis_header)
         vis_h_box.setContentsMargins(0, 0, 0, 0)
@@ -2775,8 +2720,8 @@ class PillWidget(QFrame):
         self.btn_vis_replay.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_vis_replay.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
                 color: #EDEDED;
                 font-size: 10px;
@@ -2798,8 +2743,8 @@ class PillWidget(QFrame):
         self.vis_style_combo.setFixedHeight(24)
         self.vis_style_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 6px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', sans-serif;
@@ -2813,8 +2758,8 @@ class PillWidget(QFrame):
                 border: 1px solid cyan;
             }
             QComboBox QAbstractItemView {
-                background-color: rgba(18, 20, 28, 235);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(20, 24, 34, 235);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 8px;
                 color: #FFFFFF;
                 selection-background-color: rgba(0, 255, 255, 0.3);
@@ -2832,8 +2777,8 @@ class PillWidget(QFrame):
         self.btn_close_vis.setToolTip("Return to Compact Notch (Esc)")
         self.btn_close_vis.setStyleSheet("""
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 11px;
                 color: #CCCCCC;
                 font-size: 10px;
@@ -3070,11 +3015,12 @@ class PillWidget(QFrame):
         msg_box.setWindowTitle("Browser Not Found")
         msg_box.setText("Please Install the Browser first")
         msg_box.setIcon(QMessageBox.Icon.Warning)
-        msg_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        msg_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        msg_box.setAutoFillBackground(False)
         apply_acrylic_blur(msg_box)
         msg_box.setStyleSheet("""
             QMessageBox {
-                background-color: rgba(18, 20, 28, 220);
+                background-color: rgba(20, 24, 34, 185);
                 border: 1px solid rgba(255, 60, 60, 0.6);
                 border-radius: 14px;
             }
@@ -3086,7 +3032,7 @@ class PillWidget(QFrame):
                 padding: 8px;
             }
             QPushButton {
-                background-color: rgba(255, 255, 255, 0.07);
+                background-color: rgba(255, 255, 255, 0.08);
                 border: 1px solid rgba(255, 60, 60, 0.6);
                 border-radius: 8px;
                 color: #FFFFFF;
@@ -3226,55 +3172,83 @@ class PillWidget(QFrame):
         self.show_custom_context_menu(pos)
 
     def _apply_frame_style(self):
-        """Applies dynamic frosted-glass background transparency and RGB border styling."""
+        """Updates dynamic background transparency and triggers repaint."""
         self.current_bg_alpha += (self.target_bg_alpha - self.current_bg_alpha) * 0.22
-        bg_alpha = int(self.current_bg_alpha)
-        top_sheen_alpha = int(min(255, bg_alpha + 24))
+        self.update()
 
+    def _update_rgb_border(self):
+        """Continuously called by rgb_timer to animate RGB neon gradient and redraw."""
+        self._apply_frame_style()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        # Full Stadium-Pill / Circular Rounded Corners (border-radius: height / 2):
+        # In compact mode, radius = height / 2.0 (e.g. 16px radius for 32px height)
+        # In expanded modes, use min(22.0, rect.height() / 2.0)
+        # All four corners use smooth circular arcs with zero sharp 90-degree corners.
+        if self.current_mode == self.MODE_COMPACT:
+            radius = rect.height() / 2.0
+        else:
+            radius = min(22.0, rect.height() / 2.0)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        # Layer 1: Semi-transparent smoked glass fill: QColor(18, 22, 32, 145) (~57% opacity)
+        base_alpha = int(self.current_bg_alpha) if (self.current_mode == self.MODE_VISUALIZER and self.is_playing) else 145
+        painter.fillPath(path, QColor(18, 22, 32, base_alpha))
+
+        # Layer 2: Top-to-Bottom Glass Sheen Overlay (QLinearGradient from alpha 38 down to alpha 6)
+        sheen_grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        sheen_grad.setColorAt(0.0, QColor(255, 255, 255, 38))
+        sheen_grad.setColorAt(1.0, QColor(255, 255, 255, 6))
+        painter.fillPath(path, sheen_grad)
+
+        # Layer 3: Crisp Specular Glass Rim: 1.2px inner glass border (QColor(255, 255, 255, 75))
+        inner_rect = rect.adjusted(1.0, 1.0, -1.0, -1.0)
+        if inner_rect.width() > 0 and inner_rect.height() > 0:
+            inner_radius = max(0.0, radius - 1.0)
+            inner_path = QPainterPath()
+            inner_path.addRoundedRect(inner_rect, inner_radius, inner_radius)
+            inner_pen = QPen(QColor(255, 255, 255, 75), 1.2)
+            painter.strokePath(inner_path, inner_pen)
+
+        # Layer 4: Outer rim: smooth rotating RGB neon gradient stroke when RGB is ON,
+        # or QColor(255, 255, 255, 70) frosted rim when RGB is OFF
         if self.rgb_border_enabled:
             t = time.time()
-            # Smooth hue cycle (~3.5s per revolution)
             h = (t * 0.28) % 1.0
-
-            # Breathing glow factor (sine oscillation between 0.88 and 1.0)
             breath = 0.88 + 0.12 * math.sin(t * 3.2)
-
-            # Neon hues shifting through cyan, purple, crimson, green
             c1 = QColor.fromHsvF(h % 1.0, 0.95, breath)
             c2 = QColor.fromHsvF((h + 0.33) % 1.0, 0.95, breath)
             c3 = QColor.fromHsvF((h + 0.66) % 1.0, 0.95, breath)
 
-            # Rotating gradient angle
             theta = t * 1.5
-            x1 = 0.5 - 0.5 * math.cos(theta)
-            y1 = 0.5 - 0.5 * math.sin(theta)
-            x2 = 0.5 + 0.5 * math.cos(theta)
-            y2 = 0.5 + 0.5 * math.sin(theta)
+            cx = rect.center().x()
+            cy = rect.center().y()
+            rx = rect.width() / 2.0
+            ry = rect.height() / 2.0
+            x1 = cx - rx * math.cos(theta)
+            y1 = cy - ry * math.sin(theta)
+            x2 = cx + rx * math.cos(theta)
+            y2 = cy + ry * math.sin(theta)
 
-            border_str = (
-                f"1.5px solid qlineargradient(x1:{x1:.2f}, y1:{y1:.2f}, x2:{x2:.2f}, y2:{y2:.2f}, "
-                f"stop:0 {c1.name()}, stop:0.5 {c2.name()}, stop:1 {c3.name()})"
-            )
+            rgb_grad = QLinearGradient(QPointF(x1, y1), QPointF(x2, y2))
+            rgb_grad.setColorAt(0.0, c1)
+            rgb_grad.setColorAt(0.5, c2)
+            rgb_grad.setColorAt(1.0, c3)
+
+            outer_pen = QPen(QBrush(rgb_grad), 1.5)
+            painter.strokePath(path, outer_pen)
         else:
-            border_str = "1px solid rgba(255, 255, 255, 45)"
-
-        self.setStyleSheet(f"""
-            QFrame#pill_frame {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(34, 38, 50, {top_sheen_alpha}),
-                    stop:0.18 rgba(22, 25, 34, {bg_alpha}),
-                    stop:1.0 rgba(16, 18, 26, {bg_alpha}));
-                border-top-left-radius: 0px;
-                border-top-right-radius: 0px;
-                border-bottom-left-radius: 16px;
-                border-bottom-right-radius: 16px;
-                border: {border_str};
-            }}
-        """)
-
-    def _update_rgb_border(self):
-        """Continuously called by rgb_timer to update RGB neon gradient and background transparency."""
-        self._apply_frame_style()
+            outer_pen = QPen(QColor(255, 255, 255, 70), 1.2)
+            painter.strokePath(path, outer_pen)
 
     def toggle_rgb_border(self, enabled: bool | None = None):
         """Toggles RGB breathing neon border between dynamic gradient and static cyan."""
@@ -3340,12 +3314,12 @@ class PillWidget(QFrame):
 
     def show_custom_context_menu(self, global_pos):
         menu = QMenu(self)
-        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        apply_acrylic_blur(menu)
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        menu.setAutoFillBackground(False)
         menu.setStyleSheet("""
             QMenu {
-                background-color: rgba(18, 20, 28, 195);
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background-color: #12151E;
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 14px;
                 padding: 6px;
                 color: #EDEDED;
@@ -3373,7 +3347,7 @@ class PillWidget(QFrame):
                 border-radius: 3px;
             }
             QMenu::indicator:unchecked {
-                background-color: rgba(255, 255, 255, 0.06);
+                background-color: rgba(255, 255, 255, 0.08);
                 border: 1px solid rgba(255, 255, 255, 0.25);
                 border-radius: 3px;
             }
@@ -3419,8 +3393,12 @@ class PillWidget(QFrame):
     def open_features_guide(self):
         """Opens the sleek, dark-themed Features & Shortcuts guide dialog."""
         self.main_window.last_sound_time = time.time()
-        dlg = FeaturesShortcutsDialog(self.main_window)
-        dlg.exec()
+        self.main_window.close_all_popups()
+        self.main_window.features_dialog = FeaturesShortcutsDialog(self.main_window)
+        self.main_window.features_dialog.show()
+        self.main_window.features_dialog.raise_()
+        self.main_window.features_dialog.activateWindow()
+        self.main_window.features_dialog.center_on_screen()
 
     def prompt_change_username(self):
         """
@@ -3428,15 +3406,17 @@ class PillWidget(QFrame):
         Enforces validation (<= 15 characters, non-empty), overwrites local storage,
         and refreshes the live UI immediately.
         """
+        self.main_window.close_all_popups()
         current_name = getattr(self.main_window, "username", "") or "Host"
         dlg = UsernameDialog(
-            parent=self,
+            parent=self.main_window,
             title="Change Username",
             subtitle="Enter a new username for your Symbiote desktop notch:",
             button_text="Update Username",
             current_username=current_name,
             allow_cancel=True
         )
+        self.main_window.username_dialog = dlg
         screen = QApplication.primaryScreen()
         if screen:
             geo = screen.geometry()
@@ -3447,6 +3427,7 @@ class PillWidget(QFrame):
             new_name = dlg.chosen_username.strip()[:15]
             if new_name:
                 self.main_window.update_username(new_name)
+        self.main_window.username_dialog = None
 
     def update_username(self, new_name: str):
         """Refreshes the live compact notch UI with the new username immediately."""
@@ -3464,6 +3445,7 @@ class PillWidget(QFrame):
         self.update()
 
     def open_settings_dialog(self):
+        self.main_window.close_all_popups()
         if not hasattr(self.main_window, "settings_dialog") or self.main_window.settings_dialog is None:
             self.main_window.settings_dialog = SettingsDialog(self.main_window)
         else:
@@ -3848,6 +3830,8 @@ class NotchMainWindow(QMainWindow):
         self.base_height = DEFAULT_COLLAPSED_HEIGHT
         self.top_offset = 0
         self.settings_dialog = None
+        self.features_dialog = None
+        self.username_dialog = None
 
         # Persistent window flags: Tool | FramelessWindowHint | WindowStaysOnTopHint
         self.setWindowFlags(
@@ -3855,7 +3839,8 @@ class NotchMainWindow(QMainWindow):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         apply_acrylic_blur(self)
 
         # Place the cyan-bordered QFrame inside it with a strict setFixedSize(230, 40)
@@ -3989,6 +3974,17 @@ class NotchMainWindow(QMainWindow):
             self.audio_thread.start()
 
         print(f"[INFO] Notch formed at ({self.x()}, {self.y()}, {self.width()}, {self.height()}). Audio thread running.")
+
+    def close_all_popups(self, except_dialog=None):
+        """Closes any active secondary pop-up dialogs to prevent stacking or text bleed-through."""
+        for dlg_attr in ("settings_dialog", "features_dialog", "username_dialog"):
+            dlg = getattr(self, dlg_attr, None)
+            if dlg is not None and dlg is not except_dialog:
+                try:
+                    if hasattr(dlg, "isVisible") and dlg.isVisible():
+                        dlg.close()
+                except Exception:
+                    pass
 
     def _apply_sizes(self):
         target_size = self.pill_widget.get_mode_size(self.pill_widget.current_mode)

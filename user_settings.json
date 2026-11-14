@@ -1,9 +1,9 @@
 {
-    "username": "CommittedHost",
+    "username": "venom",
     "rgb_border": false,
-    "autostart": false,
+    "autostart": true,
     "base_width": 320,
     "base_height": 55,
-    "top_offset": 18,
+    "top_offset": 0,
     "visualizer_style": "Matrix Rain"
 }
