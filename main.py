@@ -1,11 +1,15 @@
 import os
 import sys
+import json
 import time
 import math
 import shutil
+import platform
 import urllib.parse
 import subprocess
 import traceback
+import ctypes
+from ctypes import wintypes
 from datetime import datetime, timezone, timedelta
 import keyboard
 import numpy as np
@@ -88,23 +92,329 @@ def get_stored_username() -> str | None:
 def save_username(username: str):
     """
     Saves username into the local user-specific file on the user's PC,
-    ensuring decentralized, private user storage.
+    ensuring decentralized, private user storage with robust fallback paths.
     """
-    try:
-        parent_dir = os.path.dirname(USER_DATA_FILE)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-        with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
-            f.write(username.strip() + "\n")
-        print(f"[INFO] Username '{username.strip()}' saved to local user storage: {USER_DATA_FILE}")
-    except Exception as e:
-        print(f"[ERROR] Failed saving username to {USER_DATA_FILE}: {e}")
+    global USER_DATA_FILE
+    target_paths = [
+        USER_DATA_FILE,
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        target_paths.append(os.path.join(appdata, "VenomNotch", "user_data.txt"))
+        target_paths.append(os.path.join(appdata, ".venom_notch_user.txt"))
+    target_paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data.txt"))
+
+    saved = False
+    for path in target_paths:
+        if not path:
+            continue
+        try:
+            parent_dir = os.path.dirname(path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(username.strip() + "\n")
+            USER_DATA_FILE = path
+            print(f"[INFO] Username '{username.strip()}' saved to local user storage: {path}")
+            saved = True
+            break
+        except Exception:
+            continue
+
+    if not saved:
+        print("[ERROR] Failed saving username to any available storage location.")
+
+
+def get_user_settings_filepath() -> str:
+    """
+    Dynamically generates the user-specific settings JSON file path.
+    Prioritizes user's home directory (~/.venom_notch_settings.json) or %APPDATA%/VenomNotch/settings.json.
+    """
+    home_dir = os.path.expanduser("~")
+    primary_path = os.path.join(home_dir, ".venom_notch_settings.json")
+    if os.path.exists(primary_path):
+        return primary_path
+
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        appdata_file = os.path.join(appdata, "VenomNotch", "settings.json")
+        if os.path.exists(appdata_file):
+            return appdata_file
+        appdata_dot = os.path.join(appdata, ".venom_notch_settings.json")
+        if os.path.exists(appdata_dot):
+            return appdata_dot
+
+    return primary_path
+
+
+USER_SETTINGS_FILE = get_user_settings_filepath()
+
+
+def load_user_settings() -> dict:
+    """
+    Loads saved user UI settings (dimensions, position, visualizer style, rgb border)
+    from local user storage.
+    """
+    candidate_paths = [
+        USER_SETTINGS_FILE,
+        os.path.join(os.path.expanduser("~"), ".venom_notch_settings.json"),
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidate_paths.append(os.path.join(appdata, "VenomNotch", "settings.json"))
+        candidate_paths.append(os.path.join(appdata, ".venom_notch_settings.json"))
+    candidate_paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json"))
+
+    for path in candidate_paths:
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception as e:
+                print(f"[ERROR] Failed reading settings from {path}: {e}")
+    return {}
+
+
+def save_user_settings(settings: dict):
+    """
+    Saves UI settings into the local user-specific file on the user's PC with robust fallback paths.
+    """
+    global USER_SETTINGS_FILE
+    target_paths = [
+        USER_SETTINGS_FILE,
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        target_paths.append(os.path.join(appdata, "VenomNotch", "settings.json"))
+        target_paths.append(os.path.join(appdata, ".venom_notch_settings.json"))
+    target_paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json"))
+
+    saved = False
+    for path in target_paths:
+        if not path:
+            continue
+        try:
+            parent_dir = os.path.dirname(path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=4)
+            USER_SETTINGS_FILE = path
+            print(f"[INFO] Settings saved to local storage: {path}")
+            saved = True
+            break
+        except Exception:
+            continue
+
+    if not saved:
+        print("[ERROR] Failed saving settings to any available storage location.")
+
+
+# --- Auto-Start (1-Min Delay) Configuration ---
+AUTOSPARSE_TASK_NAME = "SymbioteDesktopNotch"
+LINUX_AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
+LINUX_AUTOSTART_FILE = os.path.join(LINUX_AUTOSTART_DIR, "symbiote-notch.desktop")
+WIN_STARTUP_DIR = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
+WIN_STARTUP_FILE = os.path.join(WIN_STARTUP_DIR, "SymbioteDesktopNotch.vbs")
+
+
+def is_autostart_enabled() -> bool:
+    """
+    Checks if auto-start (1-minute delayed startup) is currently enabled.
+    Returns True if scheduled task (Windows) or .desktop file (Linux) or Windows Startup file exists.
+    """
+    system = platform.system()
+    if system == "Windows":
+        # 1. Query Windows Task Scheduler for SymbioteDesktopNotch task
+        try:
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            res = subprocess.run(
+                ["schtasks", "/query", "/tn", AUTOSPARSE_TASK_NAME],
+                capture_output=True,
+                text=True,
+                creationflags=creation_flags,
+                timeout=5
+            )
+            if res.returncode == 0:
+                return True
+        except Exception as e:
+            print(f"[DEBUG] schtasks /query note: {e}")
+
+        # 2. Check user-level Windows Startup file fallback
+        if os.path.exists(WIN_STARTUP_FILE):
+            return True
+
+        return False
+
+    elif system == "Linux":
+        return os.path.exists(LINUX_AUTOSTART_FILE)
+
+    return False
+
+
+def set_autostart_enabled(enable: bool) -> tuple[bool, str]:
+    """
+    Configures or removes the 1-minute delayed auto-start configuration.
+    Compatible with both packaged .exe (sys.frozen) and .py execution.
+    - Windows: Uses schtasks to create a user-level task with ONLOGON trigger and /delay 0001:00.
+               Falls back to user Startup VBS if Task Scheduler requires elevation.
+    - Linux: Uses ~/.config/autostart/symbiote-notch.desktop with X-GNOME-Autostart-Delay=60 and sleep 60.
+    Returns (success: bool, status_message: str).
+    """
+    system = platform.system()
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    if system == "Windows":
+        if enable:
+            # 1. Determine target action command
+            if getattr(sys, "frozen", False):
+                # Running as compiled standalone executable (.exe)
+                target_exe = sys.executable
+                tr_command = f'"{target_exe}"'
+                vbs_cmd = f'"""{target_exe}"""'
+            else:
+                # Python script execution: prefer pythonw.exe to prevent black console flash
+                python_exe = sys.executable
+                if python_exe.lower().endswith("python.exe"):
+                    candidate_w = python_exe[:-10] + "pythonw.exe"
+                    if os.path.exists(candidate_w):
+                        python_exe = candidate_w
+                script_path = os.path.abspath(__file__)
+                tr_command = f'"{python_exe}" "{script_path}"'
+                vbs_cmd = f'"""{python_exe}""" """{script_path}"""'
+
+            # 2. Primary implementation: Windows schtasks with 1-minute delay (/delay 0001:00)
+            schtasks_ok = False
+            schtasks_err = ""
+            try:
+                cmd = [
+                    "schtasks",
+                    "/create",
+                    "/tn", AUTOSPARSE_TASK_NAME,
+                    "/tr", tr_command,
+                    "/sc", "ONLOGON",
+                    "/delay", "0001:00",
+                    "/f"
+                ]
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    creationflags=creation_flags,
+                    timeout=10
+                )
+                if res.returncode == 0:
+                    schtasks_ok = True
+                else:
+                    schtasks_err = (res.stderr.strip() or res.stdout.strip())
+            except Exception as e:
+                schtasks_err = str(e)
+
+            if schtasks_ok:
+                # Clean up any leftover fallback file
+                try:
+                    if os.path.exists(WIN_STARTUP_FILE):
+                        os.remove(WIN_STARTUP_FILE)
+                except Exception:
+                    pass
+                msg = "Auto-Start enabled (1-minute delay via Task Scheduler)."
+                print(f"[INFO] {msg}")
+                return True, msg
+            else:
+                # Fallback: Create user-level Startup VBScript with 60-second delay
+                try:
+                    os.makedirs(WIN_STARTUP_DIR, exist_ok=True)
+                    vbs_content = (
+                        "WScript.Sleep 60000\n"
+                        "Set WshShell = CreateObject(\"WScript.Shell\")\n"
+                        f"WshShell.Run {vbs_cmd}, 0, False\n"
+                    )
+                    with open(WIN_STARTUP_FILE, "w", encoding="utf-8") as f:
+                        f.write(vbs_content)
+                    msg = "Auto-Start enabled (1-minute delay after logon)."
+                    print(f"[INFO] {msg}")
+                    return True, msg
+                except Exception as ex:
+                    err_msg = f"Failed to enable auto-start ({schtasks_err or ex})"
+                    print(f"[ERROR] {err_msg}")
+                    return False, err_msg
+        else:
+            # When Toggled OFF: delete scheduled task cleanly
+            try:
+                subprocess.run(
+                    ["schtasks", "/delete", "/tn", AUTOSPARSE_TASK_NAME, "/f"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=creation_flags,
+                    timeout=10
+                )
+            except Exception as e:
+                print(f"[DEBUG] schtasks delete note: {e}")
+
+            try:
+                if os.path.exists(WIN_STARTUP_FILE):
+                    os.remove(WIN_STARTUP_FILE)
+            except Exception as e:
+                print(f"[DEBUG] startup file remove note: {e}")
+
+            msg = "Auto-Start disabled."
+            print(f"[INFO] {msg}")
+            return True, msg
+
+    elif system == "Linux":
+        if enable:
+            try:
+                os.makedirs(LINUX_AUTOSTART_DIR, exist_ok=True)
+                if getattr(sys, "frozen", False):
+                    exec_cmd = f'sh -c "sleep 60 && \\"{sys.executable}\\""'
+                else:
+                    script_path = os.path.abspath(__file__)
+                    exec_cmd = f'sh -c "sleep 60 && \\"{sys.executable}\\" \\"{script_path}\\""'
+
+                desktop_content = f"""[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Symbiote Desktop Notch
+Comment=Launch Symbiote Notch after 1-minute delay
+Exec={exec_cmd}
+X-GNOME-Autostart-Delay=60
+StartupNotify=false
+Terminal=false
+"""
+                with open(LINUX_AUTOSTART_FILE, "w", encoding="utf-8") as f:
+                    f.write(desktop_content)
+                os.chmod(LINUX_AUTOSTART_FILE, 0o755)
+                msg = "Auto-Start enabled (1-minute delay after logon)."
+                print(f"[INFO] {msg}")
+                return True, msg
+            except Exception as e:
+                err_msg = f"Linux autostart error: {e}"
+                print(f"[ERROR] {err_msg}")
+                return False, err_msg
+        else:
+            try:
+                if os.path.exists(LINUX_AUTOSTART_FILE):
+                    os.remove(LINUX_AUTOSTART_FILE)
+                msg = "Auto-Start disabled."
+                print(f"[INFO] {msg}")
+                return True, msg
+            except Exception as e:
+                err_msg = f"Linux autostart remove error: {e}"
+                print(f"[ERROR] {err_msg}")
+                return False, err_msg
+
+    return False, f"Unsupported operating system: {system}"
+
 
 from PyQt6.QtCore import (
     Qt,
     QSize,
+    QRect,
     QRectF,
     QObject,
+    QEvent,
     QPoint,
     QPointF,
     pyqtSignal,
@@ -142,13 +452,15 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QComboBox,
+    QAbstractItemView,
     QMessageBox,
-    QCheckBox
+    QCheckBox,
+    QToolTip
 )
 
 # --- Configuration Constants ---
-DEFAULT_COLLAPSED_WIDTH = 230  # Strict default width for collapsed notch
-DEFAULT_COLLAPSED_HEIGHT = 40  # Strict default height for collapsed notch
+DEFAULT_COLLAPSED_WIDTH = 190  # Strict default width for collapsed notch (reduced from 230)
+DEFAULT_COLLAPSED_HEIGHT = 32  # Strict default height for collapsed notch (reduced from 40)
 VOLUME_THRESHOLD = 0.015       # RMS threshold to detect media playback (low threshold)
 SILENCE_TIMEOUT = 3.0          # Seconds of continuous silence before auto-collapse
 NUM_BARS = 24                  # Number of visualizer frequency bars
@@ -229,141 +541,210 @@ def get_browser_executable(browser_choice: str) -> tuple[str | None, str, bool]:
     except Exception:
         pass
 
-    # 4. Fallback for native Microsoft Edge on Windows 11
+    # 4. Fallback for native Microsoft Edge on Windows/Linux
     if browser_name == "Edge":
-        return ("msedge.exe", browser_name, is_incognito)
+        edge_p = get_edge_executable()
+        return (edge_p, browser_name, is_incognito)
 
     # Browser not installed
     return (None, browser_name, is_incognito)
 
 
-def open_or_focus_ai(ai_name: str, url: str, is_incognito: bool = False, browser: str = "Edge"):
+def get_edge_executable() -> str | None:
     """
-    Robust window-switching function using a PowerShell command with Win32 API (user32.dll via C# Add-Type):
-    When an AI icon (Gemini, ChatGPT, Claude) is clicked:
-    1. Searches open desktop windows for a title containing the specific AI name ('Gemini', 'ChatGPT', or 'Claude').
-    2. If a matching window is already open (e.g., an existing Microsoft Edge window), uses SetForegroundWindow
-       and ShowWindowAsync to bring that exact window to the front and focus it, preventing redundant tabs from opening.
-    3. If no matching Edge window is open, launches a fresh tab specifically using Microsoft Edge
-       (msedge.exe or start msedge <url>), completely removing any dependency on other browsers for the AI buttons.
-    4. Respects normal/incognito mode from the search dropdown (launching with -inprivate when an incognito profile is active).
+    Locates and returns the Microsoft Edge executable path on Windows or Linux.
+    Returns None if Microsoft Edge is not installed.
     """
-    if isinstance(is_incognito, str):
-        incog_flag = "(Incognito)" in is_incognito
-    else:
-        incog_flag = bool(is_incognito) or ("(Incognito)" in str(browser))
+    system = platform.system()
+    if system == "Windows":
+        known_paths = [
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+        ]
+        for p in known_paths:
+            if p and os.path.isfile(p):
+                return p
 
-    # Resolve Microsoft Edge executable path
-    edge_exe, _, _ = get_browser_executable("Edge")
-    target_exe = edge_exe if edge_exe else "msedge.exe"
-    launch_args = f"-inprivate {url}" if incog_flag else url
-    fallback_cmd = f'start msedge -inprivate "{url}"' if incog_flag else f'start msedge "{url}"'
+        # Check PATH via shutil.which
+        w = shutil.which("msedge.exe") or shutil.which("msedge")
+        if w and os.path.isfile(w):
+            return w
 
-    target_exe_ps = target_exe.replace('"', '`"')
-    launch_args_ps = launch_args.replace('"', '`"')
+        # Check Windows App Paths in Registry
+        try:
+            import winreg
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe") as key:
+                        val, _ = winreg.QueryValueEx(key, "")
+                        if val and os.path.isfile(val):
+                            return val
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-    ps_code = f"""
-$csharp = @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
+        return None
 
-public class Win32Focus {{
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    elif system == "Linux":
+        for cand in ["microsoft-edge-stable", "microsoft-edge", "msedge"]:
+            w = shutil.which(cand)
+            if w:
+                return w
+        return None
 
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    return None
 
-    [DllImport("user32.dll")]
-    public static extern int GetWindowTextLength(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
+def find_matching_edge_window(ai_name: str) -> int | None:
+    """
+    Enumerates visible top-level windows on Windows using ctypes.windll.user32.EnumWindows.
+    Checks if any open Microsoft Edge window title contains the target AI name
+    (case-insensitive: 'gemini', 'chatgpt', or 'claude') along with 'edge'.
+    Returns HWND if found, None otherwise.
+    """
+    if platform.system() != "Windows" or not hasattr(ctypes, "windll"):
+        return None
 
-    [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    user32 = ctypes.windll.user32
+    target_ai = ai_name.lower().strip()
+    matching_hwnd = None
 
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-    [DllImport("user32.dll")]
-    public static extern bool BringWindowToTop(IntPtr hWnd);
+    def enum_cb(hwnd, lparam):
+        nonlocal matching_hwnd
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
 
-    public static IntPtr FindWindowByTitle(string substring) {{
-        IntPtr result = IntPtr.Zero;
-        EnumWindows((hWnd, lParam) => {{
-            if (!IsWindowVisible(hWnd)) return true;
-            int length = GetWindowTextLength(hWnd);
-            if (length == 0) return true;
-            StringBuilder sb = new StringBuilder(length + 1);
-            GetWindowText(hWnd, sb, sb.Capacity);
-            string title = sb.ToString();
-            if (title.IndexOf(substring, StringComparison.OrdinalIgnoreCase) >= 0) {{
-                result = hWnd;
-                return false;
-            }}
-            return true;
-        }}, IntPtr.Zero);
-        return result;
-    }}
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value.strip().lower()
 
-    public static bool FocusWindow(IntPtr hWnd) {{
-        ShowWindowAsync(hWnd, 9); // SW_RESTORE
-        BringWindowToTop(hWnd);
-        return SetForegroundWindow(hWnd);
-    }}
-}}
-'@
+                # Check if title contains target AI name ('gemini', 'chatgpt', or 'claude') along with 'edge'
+                if target_ai in title and "edge" in title:
+                    matching_hwnd = hwnd
+                    return False  # Stop enumeration once found
+        except Exception:
+            pass
+        return True
 
-try {{
-    Add-Type -TypeDefinition $csharp -ErrorAction Stop
-}} catch {{
-}}
-
-$hWnd = [Win32Focus]::FindWindowByTitle("{ai_name}")
-if ($hWnd -ne [IntPtr]::Zero) {{
-    [Win32Focus]::FocusWindow($hWnd)
-    Write-Output "SUCCESS: Found and focused existing Edge window for {ai_name}"
-}} else {{
-    Write-Output "INFO: No open Edge window found for {ai_name}. Opening fresh tab in Microsoft Edge (incognito={incog_flag})..."
-    try {{
-        Start-Process "{target_exe_ps}" -ArgumentList "{launch_args_ps}"
-    }} catch {{
-        {fallback_cmd}
-    }}
-}}
-"""
     try:
-        print(f"[AI LAUNCH] Searching open windows for '{ai_name}' (target: Microsoft Edge, inprivate={incog_flag})...")
-        proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", ps_code],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
-        def _check_result():
-            try:
-                res = proc.communicate(timeout=6)
-                if isinstance(res, tuple) and len(res) == 2:
-                    stdout, stderr = res
-                    if stdout:
-                        print(f"[AI LAUNCH] {stdout.strip()}")
-                    if stderr:
-                        print(f"[ERROR] PowerShell stderr: {stderr.strip()}")
-            except subprocess.TimeoutExpired:
-                print(f"[WARNING] PowerShell launch query timed out.")
-            except Exception as ex:
-                print(f"[ERROR] Failed reading launch output: {ex}")
-
-        import threading
-        threading.Thread(target=_check_result, daemon=True).start()
-
+        user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
     except Exception as e:
-        print(f"[ERROR] Failed to execute open_or_focus_ai for '{ai_name}': {e}")
-        traceback.print_exc()
+        print(f"[DEBUG] EnumWindows error: {e}")
+
+    return matching_hwnd
+
+
+def focus_window_windows(hwnd: int) -> bool:
+    """
+    Restores and brings a window directly to the foreground on Windows:
+    1. If minimized, restores it with ShowWindow(hwnd, SW_RESTORE=9).
+    2. Brings window to top with BringWindowToTop(hwnd).
+    3. Uses AttachThreadInput fallback so Windows allows stealing focus cleanly,
+       then calls SetForegroundWindow(hwnd).
+    """
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        SW_RESTORE = 9
+
+        # Restore window if minimized
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.BringWindowToTop(hwnd)
+
+        # Attempt SetForegroundWindow directly
+        if user32.SetForegroundWindow(hwnd):
+            return True
+
+        # AttachThreadInput fallback so Windows allows stealing focus cleanly
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_thread_id = user32.GetWindowThreadProcessId(fg_hwnd, None)
+        cur_thread_id = kernel32.GetCurrentThreadId()
+
+        if fg_thread_id != cur_thread_id:
+            user32.AttachThreadInput(cur_thread_id, fg_thread_id, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.AttachThreadInput(cur_thread_id, fg_thread_id, False)
+        else:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+
+        return True
+    except Exception as e:
+        print(f"[DEBUG] focus_window_windows error: {e}")
+        return False
+
+
+def open_or_focus_ai(ai_name: str, url: str, edge_exe: str | None = None) -> bool:
+    """
+    Smart Focus-or-Launch-New-Window behavior for AI Hub icons (Gemini, ChatGPT, Claude) in Microsoft Edge:
+    1. Search Existing Edge Windows First (ctypes EnumWindows):
+       Check if any open Edge window title contains the target AI name and 'edge'.
+    2. If Already Open -> Focus & Switch:
+       Restore if minimized (ShowWindow(hwnd, 9)) and bring to foreground (SetForegroundWindow with AttachThreadInput).
+       Do not open a duplicate tab or window.
+    3. If Not Open -> Launch in a Dedicated New Edge Window:
+       Launch Microsoft Edge with the --new-window flag and the target URL.
+    4. Linux Compatibility Fallback:
+       Attempt to focus existing window matching the AI name via wmctrl -a <name>;
+       if that fails or isn't open, launch microsoft-edge-stable --new-window <url>.
+    """
+    system = platform.system()
+
+    if system == "Windows":
+        # 1. Search existing Edge windows first
+        matched_hwnd = find_matching_edge_window(ai_name)
+        if matched_hwnd:
+            print(f"[AI HUB] Found existing Microsoft Edge window for '{ai_name}' (HWND: {matched_hwnd}). Focusing...")
+            focus_window_windows(matched_hwnd)
+            return True
+
+        # 2. If Not Open -> Launch in a Dedicated New Edge Window
+        target_exe = edge_exe or get_edge_executable() or "msedge.exe"
+        print(f"[AI HUB] No open Edge window found for '{ai_name}'. Launching dedicated new Edge window (--new-window)...")
+        try:
+            subprocess.Popen([target_exe, "--new-window", url])
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to launch Edge via subprocess: {e}")
+            try:
+                subprocess.Popen(f'start msedge --new-window "{url}"', shell=True)
+                return True
+            except Exception as ex:
+                print(f"[ERROR] Shell fallback also failed: {ex}")
+                return False
+
+    elif system == "Linux":
+        # 1. Attempt to focus an existing window matching AI name via wmctrl -a <name>
+        focused = False
+        if shutil.which("wmctrl"):
+            try:
+                res = subprocess.run(["wmctrl", "-a", ai_name], capture_output=True, timeout=3)
+                if res.returncode == 0:
+                    focused = True
+                    print(f"[AI HUB] Focused existing '{ai_name}' window on Linux via wmctrl.")
+                    return True
+            except Exception as e:
+                print(f"[DEBUG] Linux wmctrl focus error: {e}")
+
+        # 2. Launch in a dedicated new Edge window on Linux
+        target_exe = edge_exe or get_edge_executable() or "microsoft-edge-stable"
+        print(f"[AI HUB] Launching dedicated new Edge window for '{ai_name}' on Linux...")
+        try:
+            subprocess.Popen([target_exe, "--new-window", url])
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to launch Edge on Linux: {e}")
+            return False
+
+    return False
 
 
 class CircularAIButton(QWidget):
@@ -713,7 +1094,7 @@ class MiniVisualizerWidget(QWidget):
         super().__init__(parent)
         self.pill_widget = pill_widget
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(26, 16)
+        self.setFixedSize(18, 12)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -721,18 +1102,18 @@ class MiniVisualizerWidget(QWidget):
 
         w = float(self.width())
         h = float(self.height())
-        bar_w = 2.5
+        bar_w = 2.0
         gap = 2.0
         painter.setPen(Qt.PenStyle.NoPen)
 
         for i in range(4):
             val = self.pill_widget.rendered_bars[i * 5] if len(self.pill_widget.rendered_bars) > i * 5 else 0.1
-            bh = max(3.0, val * h)
+            bh = max(2.5, val * h)
             bx = i * (bar_w + gap)
             by = (h - bh) / 2.0
             color = QColor(0, 255, 255, 230) if self.pill_widget.is_playing else QColor(130, 135, 145, 180)
             painter.setBrush(color)
-            painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.2, 1.2)
+            painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.0, 1.0)
 
 
 class SettingsDialog(QDialog):
@@ -743,12 +1124,23 @@ class SettingsDialog(QDialog):
     - Base Width & Height dimensions
     - Top Y offset positioning
     - Audio Visualizer style selector
+
+    Implements a Save on 'Done' / Discard on 'Close' (X, Esc, or Cancel) state management pattern:
+    - Takes snapshot of all settings on open.
+    - Live-previews changes on the notch while open.
+    - Commits and permanently saves on 'Done'.
+    - Reverts all controls and the notch back to initial snapshot on 'X', Esc, or Cancel.
+    - Closing never terminates the application.
     """
     def __init__(self, main_window: "NotchMainWindow", parent=None):
         super().__init__(parent)
         self.main_window = main_window
         self.setWindowTitle("UI Settings")
         self.setFixedWidth(410)
+
+        self.is_committed = False
+        self.pending_username = (getattr(self.main_window, "username", "Host") or "Host")[:15]
+        self.initial_snapshot = self.take_snapshot()
 
         self.setStyleSheet("""
             QDialog {
@@ -905,7 +1297,39 @@ class SettingsDialog(QDialog):
         rgb_box.addStretch()
         form_layout.addRow("RGB Border:", rgb_container)
 
-        # 3. Base Width Slider & SpinBox
+        # 3. Auto-Start (1m Delay) Toggle Row
+        autostart_container = QWidget()
+        auto_box = QHBoxLayout(autostart_container)
+        auto_box.setContentsMargins(0, 0, 0, 0)
+        auto_box.setSpacing(10)
+
+        initial_auto = is_autostart_enabled()
+        self.autostart_checkbox = QCheckBox("Launch on Startup (1-Min Delay)")
+        self.autostart_checkbox.setChecked(initial_auto)
+        self.autostart_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.autostart_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #EDEDED;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border-radius: 4px;
+                border: 1.5px solid cyan;
+                background-color: rgba(22, 22, 30, 0.9);
+            }
+            QCheckBox::indicator:checked {
+                background-color: cyan;
+            }
+        """)
+        auto_box.addWidget(self.autostart_checkbox)
+        auto_box.addStretch()
+        form_layout.addRow("Auto-Start (1m Delay):", autostart_container)
+
+        # 4. Base Width Slider & SpinBox
         self.width_slider = QSlider(Qt.Orientation.Horizontal)
         self.width_slider.setRange(DEFAULT_COLLAPSED_WIDTH, 420)
         self.width_slider.setValue(max(DEFAULT_COLLAPSED_WIDTH, self.main_window.base_width))
@@ -923,7 +1347,7 @@ class SettingsDialog(QDialog):
         w_box.addWidget(self.width_spin)
         form_layout.addRow("Base Width:", width_container)
 
-        # 4. Base Height Slider & SpinBox
+        # 5. Base Height Slider & SpinBox
         self.height_slider = QSlider(Qt.Orientation.Horizontal)
         self.height_slider.setRange(DEFAULT_COLLAPSED_HEIGHT, 70)
         self.height_slider.setValue(max(DEFAULT_COLLAPSED_HEIGHT, self.main_window.base_height))
@@ -941,7 +1365,7 @@ class SettingsDialog(QDialog):
         h_box.addWidget(self.height_spin)
         form_layout.addRow("Base Height:", height_container)
 
-        # 5. Y-Axis Position Slider & SpinBox
+        # 6. Y-Axis Position Slider & SpinBox
         self.y_slider = QSlider(Qt.Orientation.Horizontal)
         self.y_slider.setRange(0, 150)
         self.y_slider.setValue(self.main_window.top_offset)
@@ -959,7 +1383,7 @@ class SettingsDialog(QDialog):
         y_box.addWidget(self.y_spin)
         form_layout.addRow("Y Position:", y_container)
 
-        # 6. Audio Visualizer Style ComboBox
+        # 7. Audio Visualizer Style ComboBox
         self.style_combo = QComboBox()
         self.style_combo.addItems(["Waveform", "Frequency Bars", "Circular Pulse", "Matrix Rain"])
         cur_style = self.main_window.pill_widget.visualizer_style
@@ -971,11 +1395,77 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(form_layout)
 
-        btn_close = QPushButton("Done")
-        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_close.clicked.connect(self.accept)
-        layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
+        # Buttons Row: Features & Shortcuts (bottom-left), Cancel and Done (right)
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 8, 0, 0)
+        btn_layout.setSpacing(10)
 
+        self.btn_features = QPushButton("📖  Features & Shortcuts")
+        self.btn_features.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_features.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 255, 255, 0.12);
+                color: cyan;
+                border: 1px solid rgba(0, 255, 255, 0.4);
+                border-radius: 8px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 7px 14px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 255, 255, 0.25);
+                color: #FFFFFF;
+                border-color: cyan;
+            }
+        """)
+        self.btn_features.clicked.connect(self._on_features_clicked)
+        btn_layout.addWidget(self.btn_features)
+
+        btn_layout.addStretch()
+
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.08);
+                color: #D1D5DB;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 8px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 7px 18px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.16);
+                color: #FFFFFF;
+                border-color: rgba(255, 255, 255, 0.32);
+            }
+        """)
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_cancel)
+
+        self.btn_done = QPushButton("Done")
+        self.btn_done.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_done.setStyleSheet("""
+            QPushButton {
+                background-color: cyan;
+                color: #000000;
+                border: none;
+                border-radius: 8px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 7px 22px;
+            }
+            QPushButton:hover {
+                background-color: #00e5e5;
+            }
+        """)
+        self.btn_done.clicked.connect(self.on_done)
+        btn_layout.addWidget(self.btn_done)
+
+        layout.addLayout(btn_layout)
+
+        # Slider and ComboBox live preview bindings
         self.width_slider.valueChanged.connect(self.width_spin.setValue)
         self.width_spin.valueChanged.connect(self.width_slider.setValue)
         self.width_slider.valueChanged.connect(self.main_window.update_base_width)
@@ -989,6 +1479,141 @@ class SettingsDialog(QDialog):
         self.y_slider.valueChanged.connect(self.main_window.update_top_offset)
 
         self.style_combo.currentTextChanged.connect(self.main_window.update_visualizer_style)
+
+    def take_snapshot(self) -> dict:
+        """Takes a backup snapshot dictionary of all current active settings."""
+        cur_style = getattr(self.main_window.pill_widget, "visualizer_style", "Waveform")
+        if cur_style == "Wave": cur_style = "Waveform"
+        elif cur_style == "Bars": cur_style = "Frequency Bars"
+        elif cur_style == "Pulse Dots": cur_style = "Circular Pulse"
+        auto_val = getattr(self, "autostart_checkbox", None)
+        auto_enabled = auto_val.isChecked() if auto_val is not None else is_autostart_enabled()
+        return {
+            "username": (getattr(self.main_window, "username", "Host") or "Host")[:15],
+            "rgb_border": bool(self.main_window.pill_widget.rgb_border_enabled),
+            "autostart": bool(auto_enabled),
+            "base_width": int(self.main_window.base_width),
+            "base_height": int(self.main_window.base_height),
+            "top_offset": int(self.main_window.top_offset),
+            "visualizer_style": cur_style,
+        }
+
+    def revert_to_snapshot(self):
+        """
+        Reverts all settings on the main notch window and this dialog's UI controls
+        back to the exact backup snapshot taken when the dialog was opened.
+        """
+        if not hasattr(self, "initial_snapshot") or not self.initial_snapshot:
+            return
+
+        snap = self.initial_snapshot
+        print(f"[INFO] Discarding UI Settings changes, reverting to snapshot: {snap}")
+
+        # Revert username
+        orig_username = snap.get("username", "Host")
+        self.pending_username = orig_username
+        self.main_window.username = orig_username
+        save_username(orig_username)
+        if hasattr(self.main_window, "pill_widget") and self.main_window.pill_widget:
+            self.main_window.pill_widget.update_username(orig_username)
+
+        # Revert RGB border
+        orig_rgb = snap.get("rgb_border", True)
+        if hasattr(self.main_window, "pill_widget") and self.main_window.pill_widget:
+            if self.main_window.pill_widget.rgb_border_enabled != orig_rgb:
+                self.main_window.pill_widget.toggle_rgb_border(orig_rgb)
+
+        # Revert Base Width, Height, Y Position, Visualizer Style
+        orig_width = snap.get("base_width", DEFAULT_COLLAPSED_WIDTH)
+        orig_height = snap.get("base_height", DEFAULT_COLLAPSED_HEIGHT)
+        orig_y = snap.get("top_offset", 0)
+        orig_style = snap.get("visualizer_style", "Waveform")
+
+        self.main_window.update_base_width(orig_width)
+        self.main_window.update_base_height(orig_height)
+        self.main_window.update_top_offset(orig_y)
+        self.main_window.update_visualizer_style(orig_style)
+
+        # Revert autostart checkbox in dialog without modifying OS startup task
+        orig_autostart = snap.get("autostart", is_autostart_enabled())
+        if hasattr(self, "autostart_checkbox"):
+            self.autostart_checkbox.blockSignals(True)
+            self.autostart_checkbox.setChecked(orig_autostart)
+            self.autostart_checkbox.blockSignals(False)
+
+        # Sync dialog controls back to snapshot values
+        self.refresh_values()
+
+    def on_done(self):
+        """
+        Commits all settings, saves them permanently to the local user config files,
+        applies them to the main notch, and closes only the dialog.
+        """
+        self.is_committed = True
+
+        final_username = (self.pending_username or getattr(self.main_window, "username", "Host"))[:15]
+        self.main_window.update_username(final_username)
+
+        w = int(self.width_slider.value())
+        h = int(self.height_slider.value())
+        y = int(self.y_slider.value())
+        style = str(self.style_combo.currentText())
+        rgb_on = bool(self.main_window.pill_widget.rgb_border_enabled)
+
+        self.main_window.update_base_width(w)
+        self.main_window.update_base_height(h)
+        self.main_window.update_top_offset(y)
+        self.main_window.update_visualizer_style(style)
+
+        # Commit autostart only when Done is clicked
+        final_autostart = self.autostart_checkbox.isChecked() if hasattr(self, "autostart_checkbox") else is_autostart_enabled()
+        initial_autostart = self.initial_snapshot.get("autostart", is_autostart_enabled())
+        if final_autostart != initial_autostart:
+            success, msg = set_autostart_enabled(final_autostart)
+            print(f"[INFO] Auto-Start updated to {final_autostart}: {msg}")
+
+        settings_dict = {
+            "username": final_username,
+            "rgb_border": rgb_on,
+            "autostart": final_autostart,
+            "base_width": w,
+            "base_height": h,
+            "top_offset": y,
+            "visualizer_style": style,
+        }
+        save_user_settings(settings_dict)
+
+        self.initial_snapshot = dict(settings_dict)
+        self.main_window.settings_dialog = None
+        self.accept()
+
+    def reject(self):
+        """
+        Triggered when user clicks Cancel, presses Esc, or dialog is rejected.
+        Reverts notch and dialog controls to snapshot if not committed.
+        """
+        if not self.is_committed:
+            self.revert_to_snapshot()
+        self.main_window.settings_dialog = None
+        super().reject()
+
+    def closeEvent(self, event):
+        """
+        Triggered when closing via top-right 'X' button or self.close().
+        Reverts all settings to snapshot if not committed via 'Done'.
+        Accepts the close event without terminating the application.
+        """
+        if not self.is_committed:
+            self.revert_to_snapshot()
+        self.main_window.settings_dialog = None
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _update_rgb_btn_style(self, rgb_on: bool):
         if rgb_on:
@@ -1034,13 +1659,13 @@ class SettingsDialog(QDialog):
 
     def _on_rgb_checkbox_toggled(self, checked):
         if checked != self.main_window.pill_widget.rgb_border_enabled:
-            self.main_window.pill_widget.toggle_rgb_border()
+            self.main_window.pill_widget.toggle_rgb_border(checked)
         rgb_on = self.main_window.pill_widget.rgb_border_enabled
         self.rgb_toggle_btn.setText("Toggle RGB Border: ON" if rgb_on else "Toggle RGB Border: OFF")
         self._update_rgb_btn_style(rgb_on)
 
     def _on_change_username_clicked(self):
-        current_name = getattr(self.main_window, "username", "") or "Host"
+        current_name = self.pending_username or getattr(self.main_window, "username", "") or "Host"
         dlg = UsernameDialog(
             parent=self,
             title="Change Username",
@@ -1058,13 +1683,20 @@ class SettingsDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen_username:
             new_name = dlg.chosen_username.strip()[:15]
             if new_name:
-                self.main_window.update_username(new_name)
+                self.pending_username = new_name
                 self.user_display.setText(new_name)
+                # Live preview on notch without permanently saving until 'Done' is clicked
+                self.main_window.username = new_name
+                if hasattr(self.main_window, "pill_widget") and self.main_window.pill_widget:
+                    self.main_window.pill_widget.update_username(new_name)
 
     def refresh_values(self):
+        """Synchronizes all dialog UI controls with current notch/snapshot values without firing signals."""
+        current_name = (self.pending_username or getattr(self.main_window, "username", "Host") or "Host")[:15]
         if hasattr(self, "user_display"):
-            self.user_display.setText((self.main_window.username or "Host")[:15])
-        rgb_on = self.main_window.pill_widget.rgb_border_enabled
+            self.user_display.setText(current_name)
+
+        rgb_on = bool(self.main_window.pill_widget.rgb_border_enabled)
         if hasattr(self, "rgb_toggle_btn"):
             self.rgb_toggle_btn.setText("Toggle RGB Border: ON" if rgb_on else "Toggle RGB Border: OFF")
             self._update_rgb_btn_style(rgb_on)
@@ -1073,12 +1705,320 @@ class SettingsDialog(QDialog):
             self.rgb_checkbox.setChecked(rgb_on)
             self.rgb_checkbox.blockSignals(False)
 
-    def closeEvent(self, event):
-        self.main_window.settings_dialog = None
-        super().closeEvent(event)
+        if hasattr(self, "width_slider") and hasattr(self, "width_spin"):
+            val = max(DEFAULT_COLLAPSED_WIDTH, self.main_window.base_width)
+            self.width_slider.blockSignals(True)
+            self.width_spin.blockSignals(True)
+            self.width_slider.setValue(val)
+            self.width_spin.setValue(val)
+            self.width_slider.blockSignals(False)
+            self.width_spin.blockSignals(False)
+
+        if hasattr(self, "height_slider") and hasattr(self, "height_spin"):
+            val = max(DEFAULT_COLLAPSED_HEIGHT, self.main_window.base_height)
+            self.height_slider.blockSignals(True)
+            self.height_spin.blockSignals(True)
+            self.height_slider.setValue(val)
+            self.height_spin.setValue(val)
+            self.height_slider.blockSignals(False)
+            self.height_spin.blockSignals(False)
+
+        if hasattr(self, "y_slider") and hasattr(self, "y_spin"):
+            val = self.main_window.top_offset
+            self.y_slider.blockSignals(True)
+            self.y_spin.blockSignals(True)
+            self.y_slider.setValue(val)
+            self.y_spin.setValue(val)
+            self.y_slider.blockSignals(False)
+            self.y_spin.blockSignals(False)
+
+        if hasattr(self, "style_combo"):
+            cur_style = getattr(self.main_window.pill_widget, "visualizer_style", "Waveform")
+            if cur_style == "Wave": cur_style = "Waveform"
+            elif cur_style == "Bars": cur_style = "Frequency Bars"
+            elif cur_style == "Pulse Dots": cur_style = "Circular Pulse"
+            self.style_combo.blockSignals(True)
+            self.style_combo.setCurrentText(cur_style)
+            self.style_combo.blockSignals(False)
+
+        if hasattr(self, "autostart_checkbox"):
+            orig_auto = self.initial_snapshot.get("autostart", is_autostart_enabled())
+            self.autostart_checkbox.blockSignals(True)
+            self.autostart_checkbox.setChecked(orig_auto)
+            self.autostart_checkbox.blockSignals(False)
+
+    def _on_features_clicked(self):
+        """Opens the sleek, dark-themed Features & Shortcuts guide dialog without closing UI Settings or the main notch."""
+        dlg = FeaturesShortcutsDialog(self)
+        dlg.exec()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.is_committed = False
+        self.pending_username = (getattr(self.main_window, "username", "Host") or "Host")[:15]
+        self.initial_snapshot = self.take_snapshot()
+        self.refresh_values()
+
+        screen = QApplication.primaryScreen()
+        if screen:
+            scr = screen.geometry()
+            self.move(
+                scr.x() + (scr.width() - self.width()) // 2,
+                scr.y() + (scr.height() - self.height()) // 2
+            )
 
 
 UISettingsDialog = SettingsDialog
+
+
+class FeaturesShortcutsDialog(QDialog):
+    """
+    Sleek, dark-themed frameless guide dialog matching the Symbiote aesthetic:
+    - Displays keyboard controls (Alt + Arrow combinations)
+    - Highlights key features (RGB border, decentralized storage, always-on-top HUD)
+    - Centered on screen with clean Close button and Esc key support
+    - Closing never terminates the main notch application
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Features & Shortcuts")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(510, 570)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.card = QFrame(self)
+        self.card.setObjectName("guide_card")
+        self.card.setStyleSheet("""
+            QFrame#guide_card {
+                background-color: rgba(16, 16, 22, 0.98);
+                border: 2px solid cyan;
+                border-radius: 16px;
+            }
+        """)
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(24, 20, 24, 20)
+        card_layout.setSpacing(13)
+
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+
+        icon_label = QLabel("⚡", self.card)
+        icon_label.setStyleSheet("color: cyan; font-size: 20px; background: transparent; border: none;")
+        header_layout.addWidget(icon_label)
+
+        title_label = QLabel("Features & Shortcuts", self.card)
+        title_label.setStyleSheet("""
+            color: #FFFFFF;
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 17px;
+            font-weight: 700;
+            background: transparent;
+            border: none;
+        """)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+
+        btn_x = QPushButton("✕", self.card)
+        btn_x.setFixedSize(26, 26)
+        btn_x.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_x.setToolTip("Close Guide (Esc)")
+        btn_x.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 13px;
+                color: #A0AEC0;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 60, 60, 0.45);
+                border: 1px solid #FF3B30;
+                color: #FFFFFF;
+            }
+        """)
+        btn_x.clicked.connect(self.close)
+        header_layout.addWidget(btn_x)
+
+        card_layout.addLayout(header_layout)
+
+        # Subtitle
+        sub_label = QLabel("HUD Controls & Modular Sub-Notch Guide", self.card)
+        sub_label.setStyleSheet("color: #718096; font-size: 11px; font-weight: 500; background: transparent; border: none;")
+        card_layout.addWidget(sub_label)
+
+        # 1. Keyboard Shortcuts Section
+        sec1_title = QLabel("⌨️  KEYBOARD CONTROLS", self.card)
+        sec1_title.setStyleSheet("color: cyan; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
+        card_layout.addWidget(sec1_title)
+
+        shortcuts_container = QFrame(self.card)
+        shortcuts_container.setStyleSheet("""
+            QFrame {
+                background-color: rgba(24, 24, 34, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 4px;
+            }
+        """)
+        sc_layout = QVBoxLayout(shortcuts_container)
+        sc_layout.setContentsMargins(10, 8, 10, 8)
+        sc_layout.setSpacing(8)
+
+        shortcuts = [
+            ("Alt + ↑", "Main Compact Notch", "Username & live IST clock display."),
+            ("Alt + ↓", "Audio Visualizer", "Audio-reactive transparent visualizer with 4 dynamic styles."),
+            ("Alt + ←", "Smart Browser Search", "Search bar supporting Brave, Edge, Chrome (Normal & Incognito)."),
+            ("Alt + →", "Dedicated AI Hub", "Quick-launch & focus for Gemini, ChatGPT, Claude in Edge.")
+        ]
+
+        for key_combo, name, desc in shortcuts:
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            k_badge = QLabel(key_combo)
+            k_badge.setFixedWidth(70)
+            k_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            k_badge.setStyleSheet("""
+                background-color: rgba(0, 255, 255, 0.12);
+                border: 1px solid cyan;
+                border-radius: 6px;
+                color: cyan;
+                font-family: 'Segoe UI', 'Consolas', monospace;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 3px 4px;
+            """)
+            row.addWidget(k_badge)
+
+            info_col = QVBoxLayout()
+            info_col.setSpacing(1)
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+            desc_lbl = QLabel(desc)
+            desc_lbl.setStyleSheet("color: #A0AEC0; font-size: 10px; background: transparent; border: none;")
+            info_col.addWidget(name_lbl)
+            info_col.addWidget(desc_lbl)
+            row.addLayout(info_col)
+            sc_layout.addLayout(row)
+
+        card_layout.addWidget(shortcuts_container)
+
+        # 2. Key Highlights Section
+        sec2_title = QLabel("✨  KEY HIGHLIGHTS", self.card)
+        sec2_title.setStyleSheet("color: cyan; font-size: 11px; font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
+        card_layout.addWidget(sec2_title)
+
+        hl_container = QFrame(self.card)
+        hl_container.setStyleSheet("""
+            QFrame {
+                background-color: rgba(24, 24, 34, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 4px;
+            }
+        """)
+        hl_layout = QVBoxLayout(hl_container)
+        hl_layout.setContentsMargins(10, 8, 10, 8)
+        hl_layout.setSpacing(6)
+
+        highlights = [
+            ("🌈", "Customizable RGB Breathing Border", "Dynamic animated neon glow, toggleable directly from the 3-dots menu."),
+            ("🚀", "Auto-Start (1-Min Delay)", "Automatically launches the notch 1 minute after login via Task Scheduler or Startup."),
+            ("🛡️", "Local Decentralized Username Storage", "Stored privately in local user directory (~/.venom_notch_user.txt) with zero telemetry."),
+            ("📌", "Always-on-Top HUD Design", "Ultra-lightweight Windows 11 desktop companion with zero hardware bloat.")
+        ]
+
+        for icon, title_text, detail in highlights:
+            h_row = QHBoxLayout()
+            h_row.setSpacing(10)
+            h_ico = QLabel(icon)
+            h_ico.setStyleSheet("font-size: 14px; background: transparent; border: none;")
+            h_row.addWidget(h_ico)
+
+            h_text_col = QVBoxLayout()
+            h_text_col.setSpacing(1)
+            h_title = QLabel(title_text)
+            h_title.setStyleSheet("color: #E2E8F0; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+            h_desc = QLabel(detail)
+            h_desc.setStyleSheet("color: #A0AEC0; font-size: 10px; background: transparent; border: none;")
+            h_text_col.addWidget(h_title)
+            h_text_col.addWidget(h_desc)
+            h_row.addLayout(h_text_col)
+            hl_layout.addLayout(h_row)
+
+        card_layout.addWidget(hl_container)
+
+        # Footer Close Button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setFixedWidth(130)
+        self.btn_close.setFixedHeight(32)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 255, 255, 0.15);
+                border: 1.5px solid cyan;
+                border-radius: 8px;
+                color: #FFFFFF;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 255, 255, 0.35);
+                border: 2px solid #5DFEFE;
+                color: cyan;
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 255, 255, 0.55);
+            }
+        """)
+        self.btn_close.clicked.connect(self.close)
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addStretch()
+
+        card_layout.addLayout(btn_layout)
+        main_layout.addWidget(self.card)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.center_on_screen()
+
+    def center_on_screen(self):
+        screen = QApplication.primaryScreen()
+        if screen:
+            scr = screen.geometry()
+            self.move(
+                scr.x() + (scr.width() - self.width()) // 2,
+                scr.y() + (scr.height() - self.height()) // 2
+            )
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, "_drag_pos"):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class UsernameDialog(QDialog):
@@ -1357,7 +2297,10 @@ class PillWidget(QFrame):
         self.setStyleSheet("""
             QFrame#pill_frame {
                 background-color: rgba(15, 15, 15, 255);
-                border-radius: 20px;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
                 border: 2px solid cyan;
             }
         """)
@@ -1391,23 +2334,23 @@ class PillWidget(QFrame):
         self.compact_panel = QWidget(self)
         self.compact_panel.setStyleSheet("background: transparent; border: none;")
         self.compact_layout = QHBoxLayout(self.compact_panel)
-        self.compact_layout.setContentsMargins(12, 0, 10, 0)
-        self.compact_layout.setSpacing(6)
+        self.compact_layout.setContentsMargins(8, 0, 8, 0)
+        self.compact_layout.setSpacing(4)
 
         self.clock_label_compact = QLabel(get_current_ist_time(), self.compact_panel)
         self.clock_label_compact.setStyleSheet("""
             color: #E2E8F0;
             font-family: 'Segoe UI', 'Consolas', sans-serif;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 700;
             background: transparent;
             border: none;
-            padding-right: 2px;
+            padding-right: 1px;
         """)
         self.compact_layout.addWidget(self.clock_label_compact, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.status_dot = QLabel("●", self.compact_panel)
-        self.status_dot.setStyleSheet("color: cyan; font-size: 11px; background: transparent; border: none;")
+        self.status_dot.setStyleSheet("color: cyan; font-size: 8px; background: transparent; border: none;")
         self.compact_layout.addWidget(self.status_dot)
 
         display_name = (self.main_window.username or "Host")[:15]
@@ -1415,7 +2358,7 @@ class PillWidget(QFrame):
         self.username_label.setStyleSheet("""
             color: #FFFFFF;
             font-family: 'Segoe UI', sans-serif;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             background: transparent;
             border: none;
@@ -1427,16 +2370,16 @@ class PillWidget(QFrame):
 
         # Sleek, minimalist 3-dots menu button (...)
         self.btn_dots_menu = QPushButton("⋮", self.compact_panel)
-        self.btn_dots_menu.setFixedSize(20, 20)
+        self.btn_dots_menu.setFixedSize(16, 16)
         self.btn_dots_menu.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_dots_menu.setToolTip("Options Menu")
         self.btn_dots_menu.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
                 border: 1px solid transparent;
-                border-radius: 10px;
+                border-radius: 8px;
                 color: #A0AEC0;
-                font-size: 14px;
+                font-size: 11px;
                 font-weight: bold;
                 padding-bottom: 2px;
             }
@@ -1834,6 +2777,23 @@ class PillWidget(QFrame):
         ai_buttons[next_idx].button.setFocus()
         print(f"[AI HUB] Focused {ai_buttons[next_idx].name} badge.")
 
+    def focus_previous_ai_button(self) -> bool:
+        ai_buttons = [self.btn_gemini, self.btn_chatgpt, self.btn_claude]
+        if hasattr(self, "btn_close_ai") and self.btn_close_ai.hasFocus():
+            self.btn_claude.button.setFocus()
+            return True
+        for i, btn in enumerate(ai_buttons):
+            if btn.button.hasFocus():
+                if i == 0:
+                    return False  # Already at leftmost (Gemini), allow transition to Search
+                ai_buttons[i - 1].button.setFocus()
+                print(f"[AI HUB] Focused {ai_buttons[i - 1].name} badge.")
+                return True
+        if self.current_mode == self.MODE_AI_HUB:
+            ai_buttons[0].button.setFocus()
+            return True
+        return False
+
     def _update_clock(self):
         """Updates the digital clock labels with real-time Indian Standard Time (HH:MM)."""
         ist_time = get_current_ist_time()
@@ -2029,11 +2989,14 @@ class PillWidget(QFrame):
 
     def _on_ai_clicked(self, name: str, url: str):
         self.main_window.last_sound_time = time.time()
-        # Read incognito mode from the search dropdown if applicable
-        selected_option = self.browser_combo.currentText().strip()
-        is_incognito = "(Incognito)" in selected_option
-        # AI icons strictly open in Microsoft Edge by default
-        open_or_focus_ai(name, url, is_incognito=is_incognito, browser="Edge")
+        # Verify Microsoft Edge is installed
+        edge_path = get_edge_executable()
+        if not edge_path:
+            self.show_browser_not_installed_dialog()
+            return
+
+        # AI icons strictly open in Microsoft Edge with smart Focus-or-Launch-New-Window behavior
+        open_or_focus_ai(name, url, edge_exe=edge_path)
 
     def update_audio_state(self, rms: float, bars: list, is_playing: bool, silence_remaining: float):
         self.current_rms = rms
@@ -2116,7 +3079,10 @@ class PillWidget(QFrame):
         self.setStyleSheet(f"""
             QFrame#pill_frame {{
                 background-color: rgba(15, 15, 15, {bg_alpha});
-                border-radius: 20px;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
                 border: {border_str};
             }}
         """)
@@ -2143,9 +3109,14 @@ class PillWidget(QFrame):
             print("[RGB] Neon breathing border: OFF (frozen cyan)")
 
         if hasattr(self.main_window, "settings_dialog") and self.main_window.settings_dialog:
-            self.main_window.settings_dialog.rgb_checkbox.blockSignals(True)
-            self.main_window.settings_dialog.rgb_checkbox.setChecked(self.rgb_border_enabled)
-            self.main_window.settings_dialog.rgb_checkbox.blockSignals(False)
+            dlg = self.main_window.settings_dialog
+            if hasattr(dlg, "rgb_checkbox"):
+                dlg.rgb_checkbox.blockSignals(True)
+                dlg.rgb_checkbox.setChecked(self.rgb_border_enabled)
+                dlg.rgb_checkbox.blockSignals(False)
+            if hasattr(dlg, "rgb_toggle_btn"):
+                dlg.rgb_toggle_btn.setText("Toggle RGB Border: ON" if self.rgb_border_enabled else "Toggle RGB Border: OFF")
+                dlg._update_rgb_btn_style(self.rgb_border_enabled)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
@@ -2165,7 +3136,8 @@ class PillWidget(QFrame):
                 super().mousePressEvent(event)
                 return
 
-            # Direct left-click on the notch background is completely removed!
+            self.setFocus()
+            self.main_window.activateWindow()
             event.accept()
             return
 
@@ -2202,6 +3174,21 @@ class PillWidget(QFrame):
                 background-color: rgba(0, 255, 255, 0.25);
                 color: cyan;
             }
+            QMenu::indicator {
+                width: 14px;
+                height: 14px;
+                margin-left: 6px;
+            }
+            QMenu::indicator:checked {
+                background-color: cyan;
+                border: 1px solid cyan;
+                border-radius: 3px;
+            }
+            QMenu::indicator:unchecked {
+                background-color: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                border-radius: 3px;
+            }
             QMenu::separator {
                 height: 1px;
                 background: rgba(255, 255, 255, 0.15);
@@ -2209,7 +3196,7 @@ class PillWidget(QFrame):
             }
         """)
 
-        # Clean, essential high-level actions only
+        # Clean, minimal 3-dots menu actions
         settings_action = menu.addAction("⚙️  UI Settings")
         settings_action.setObjectName("action_ui_settings")
         settings_action.setData("UI Settings")
@@ -2229,6 +3216,23 @@ class PillWidget(QFrame):
         exit_action.triggered.connect(QApplication.instance().quit)
 
         menu.exec(global_pos)
+
+    def _on_toggle_autostart(self, checked: bool):
+        """Toggles 1-minute delayed auto-start on Windows/Linux and displays non-intrusive feedback."""
+        self.main_window.last_sound_time = time.time()
+        success, message = set_autostart_enabled(checked)
+        status_text = f"Auto-Start (1m Delay): {'Enabled' if checked else 'Disabled'}"
+        if hasattr(self, "btn_dots_menu") and self.btn_dots_menu:
+            self.btn_dots_menu.setToolTip(f"Options Menu ({status_text})")
+            pos = self.btn_dots_menu.mapToGlobal(QPoint(-20, self.btn_dots_menu.height() + 8))
+            prefix = "🚀" if success else "⚠️"
+            QToolTip.showText(pos, f"{prefix} {message}", self, QRect(), 2500)
+
+    def open_features_guide(self):
+        """Opens the sleek, dark-themed Features & Shortcuts guide dialog."""
+        self.main_window.last_sound_time = time.time()
+        dlg = FeaturesShortcutsDialog(self.main_window)
+        dlg.exec()
 
     def prompt_change_username(self):
         """
@@ -2275,6 +3279,7 @@ class PillWidget(QFrame):
         if not hasattr(self.main_window, "settings_dialog") or self.main_window.settings_dialog is None:
             self.main_window.settings_dialog = SettingsDialog(self.main_window)
         else:
+            self.main_window.settings_dialog.take_snapshot()
             self.main_window.settings_dialog.refresh_values()
         self.main_window.settings_dialog.show()
         self.main_window.settings_dialog.raise_()
@@ -2552,6 +3557,92 @@ class SymbioteAnimationOverlay(QWidget):
             painter.drawEllipse(QPointF(target_x, cur_h / 2.0), cur_w * 0.8, cur_h * 2.0)
 
 
+class NotchKeyFilter(QObject):
+    """
+    Application-level event filter for the notch window:
+    - Guarantees that when the notch window is actively focused, single arrow keys
+      navigate smoothly between sub-notches, inside the search input, or across AI badges.
+    - Prevents intercepting single arrow keys inside combo boxes (allowing user to select items).
+    - Ensures Alt + Arrow combinations always trigger sub-notch switches seamlessly.
+    - Never intercepts keys when other desktop applications (browsers, video players) are in focus.
+    """
+    def __init__(self, main_win: "NotchMainWindow"):
+        super().__init__(main_win)
+        self.main_win = main_win
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            # If a modal dialog is open (e.g. Settings or Change Username), let it handle its own keys
+            win = getattr(obj, "window", lambda: None)()
+            if isinstance(win, QDialog):
+                return False
+
+            key = event.key()
+            is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+            pill = getattr(self.main_win, "pill_widget", None)
+
+            # Alt + Arrow key combinations (modular notch activation)
+            if is_alt:
+                if key == Qt.Key.Key_Up:
+                    self.main_win.handle_up_arrow()
+                    return True
+                elif key == Qt.Key.Key_Down:
+                    self.main_win.handle_down_arrow()
+                    return True
+                elif key == Qt.Key.Key_Left:
+                    self.main_win.handle_left_arrow()
+                    return True
+                elif key == Qt.Key.Key_Right:
+                    self.main_win.handle_right_arrow()
+                    return True
+                return False
+
+            # Single Arrow keys (when the notch window is actively focused)
+            is_combo = isinstance(obj, (QComboBox, QAbstractItemView, QSpinBox, QSlider)) or (
+                pill is not None and (obj is getattr(pill, "browser_combo", None) or obj is getattr(pill, "vis_style_combo", None))
+            )
+            is_line_edit = isinstance(obj, QLineEdit)
+
+            if key == Qt.Key.Key_Up:
+                if is_combo:
+                    return False
+                self.main_win.handle_up_arrow()
+                return True
+
+            elif key == Qt.Key.Key_Down:
+                if is_combo:
+                    return False
+                self.main_win.handle_down_arrow()
+                return True
+
+            elif key == Qt.Key.Key_Left:
+                if is_line_edit:
+                    return False  # Allow normal cursor movement within search text
+                if pill and pill.current_mode == pill.MODE_AI_HUB:
+                    if not pill.focus_previous_ai_button():
+                        self.main_win.handle_left_arrow()
+                    return True
+                self.main_win.handle_left_arrow()
+                return True
+
+            elif key == Qt.Key.Key_Right:
+                if is_line_edit:
+                    text_len = len(obj.text())
+                    cursor_pos = obj.cursorPosition()
+                    # If search input is empty OR cursor is at the end with no selection, advance to AI Hub
+                    if text_len == 0 or (cursor_pos >= text_len and not obj.hasSelectedText()):
+                        self.main_win.handle_right_arrow()
+                        return True
+                    return False  # Allow normal cursor movement within search text
+                if pill and pill.current_mode == pill.MODE_AI_HUB:
+                    pill.focus_next_ai_button()
+                    return True
+                self.main_win.handle_right_arrow()
+                return True
+
+        return False
+
+
 class NotchMainWindow(QMainWindow):
     """
     Main desktop notch window:
@@ -2583,13 +3674,41 @@ class NotchMainWindow(QMainWindow):
         self.search_input = self.pill_widget.search_bar
         self.setCentralWidget(self.pill_widget)
         self.setFixedSize(DEFAULT_COLLAPSED_WIDTH, DEFAULT_COLLAPSED_HEIGHT)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.pill_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Position notch at top-center of primary screen
+        # Apply saved user settings if available
+        saved_settings = load_user_settings()
+        if saved_settings:
+            self.base_width = max(DEFAULT_COLLAPSED_WIDTH, int(saved_settings.get("base_width", DEFAULT_COLLAPSED_WIDTH)))
+            self.base_height = max(DEFAULT_COLLAPSED_HEIGHT, int(saved_settings.get("base_height", DEFAULT_COLLAPSED_HEIGHT)))
+            self.top_offset = max(0, int(saved_settings.get("top_offset", 0)))
+            if "visualizer_style" in saved_settings:
+                v_style = str(saved_settings["visualizer_style"])
+                self.pill_widget.visualizer_style = v_style
+                if hasattr(self.pill_widget, "vis_style_combo"):
+                    self.pill_widget.vis_style_combo.blockSignals(True)
+                    self.pill_widget.vis_style_combo.setCurrentText(v_style)
+                    self.pill_widget.vis_style_combo.blockSignals(False)
+            if "rgb_border" in saved_settings:
+                rgb_pref = bool(saved_settings["rgb_border"])
+                if self.pill_widget.rgb_border_enabled != rgb_pref:
+                    self.pill_widget.toggle_rgb_border(rgb_pref)
+            else:
+                if not self.pill_widget.rgb_border_enabled:
+                    self.pill_widget.toggle_rgb_border(True)
+        else:
+            if not self.pill_widget.rgb_border_enabled:
+                self.pill_widget.toggle_rgb_border(True)
+
+        # Position notch at top-center of primary screen flush with top bezel (Y = 0)
         screen = QApplication.primaryScreen() or self.screen()
         scr = screen.geometry() if screen else QRectF(0, 0, 1920, 1080).toRect()
         new_x = scr.x() + (scr.width() - self.base_width) // 2
         new_y = scr.y() + self.top_offset
         self.move(new_x, new_y)
+        self.setFixedSize(self.base_width, self.base_height)
+        self.pill_widget.setFixedSize(self.base_width, self.base_height)
 
         self.last_sound_time = 0.0
 
@@ -2607,6 +3726,10 @@ class NotchMainWindow(QMainWindow):
         self.bridge.left_arrow_requested.connect(self.handle_left_arrow)
         self.bridge.right_arrow_requested.connect(self.handle_right_arrow)
         self._setup_shortcuts()
+
+        # In-focus smooth keyboard navigation filter
+        self.key_filter = NotchKeyFilter(self)
+        QApplication.instance().installEventFilter(self.key_filter)
 
         # Dedicated Non-blocking Audio Thread
         self.audio_thread = AudioCaptureThread(self)
@@ -2725,6 +3848,14 @@ class NotchMainWindow(QMainWindow):
         if hasattr(self, "pill_widget") and self.pill_widget:
             self.pill_widget.prompt_change_username()
 
+    def open_features_guide(self):
+        """Opens the sleek, dark-themed Features & Shortcuts guide dialog."""
+        if hasattr(self, "pill_widget") and self.pill_widget:
+            self.pill_widget.open_features_guide()
+        else:
+            dlg = FeaturesShortcutsDialog(self)
+            dlg.exec()
+
     @property
     def is_expanded(self) -> bool:
         return self.pill_widget.current_mode != self.pill_widget.MODE_COMPACT
@@ -2746,22 +3877,28 @@ class NotchMainWindow(QMainWindow):
             self.pill_widget.switch_mode(self.pill_widget.MODE_COMPACT)
 
     def handle_up_arrow(self):
-        """Up Arrow (↑): Controls the main compact pill state (showing username & real IST clock)."""
+        """Alt+Up: Toggle/Show Main Compact Notch (showing username & real IST clock)."""
         self.last_sound_time = time.time()
+        if not self.isVisible():
+            self.show()
         self.pill_widget.switch_mode(self.pill_widget.MODE_COMPACT)
         self.raise_()
         self.activateWindow()
 
     def handle_down_arrow(self):
-        """Down Arrow (↓): Focus or open the visualizer sub-notch, or cycle styles if already open."""
+        """Alt+Down: Open Dedicated Audio Visualizer Notch (or cycle styles if open)."""
         self.last_sound_time = time.time()
+        if not self.isVisible():
+            self.show()
         self.raise_()
         self.activateWindow()
         self.pill_widget.toggle_or_focus_visualizer()
 
     def handle_left_arrow(self):
-        """Left Arrow (←): Instantly open/reveal the dedicated Smart Search sub-notch."""
+        """Alt+Left: Open Dedicated Smart Search Notch."""
         self.last_sound_time = time.time()
+        if not self.isVisible():
+            self.show()
         self.raise_()
         self.activateWindow()
         self.pill_widget.switch_mode(self.pill_widget.MODE_SEARCH)
@@ -2772,14 +3909,10 @@ class NotchMainWindow(QMainWindow):
         search_input.selectAll()
 
     def handle_right_arrow(self):
-        """Right Arrow (→): Instantly open the dedicated AI Icons hub sub-notch."""
+        """Alt+Right: Open Dedicated AI Hub Notch."""
         self.last_sound_time = time.time()
-        search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
-        if search_input.hasFocus():
-            text_len = len(search_input.text())
-            cursor_pos = search_input.cursorPosition()
-            if text_len > 0 and cursor_pos < text_len:
-                return
+        if not self.isVisible():
+            self.show()
         self.raise_()
         self.activateWindow()
         self.pill_widget.focus_ai_hub()
@@ -2788,79 +3921,45 @@ class NotchMainWindow(QMainWindow):
         self.esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.esc_shortcut.activated.connect(self._on_esc_requested)
 
-        # In-app / focused window keyboard shortcuts
-        self.up_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
-        self.up_shortcut.activated.connect(self.handle_up_arrow)
+        # In-app Alt + Arrow shortcuts
+        self.alt_up_shortcut = QShortcut(QKeySequence("Alt+Up"), self)
+        self.alt_up_shortcut.activated.connect(self.handle_up_arrow)
 
-        self.down_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
-        self.down_shortcut.activated.connect(self.handle_down_arrow)
+        self.alt_down_shortcut = QShortcut(QKeySequence("Alt+Down"), self)
+        self.alt_down_shortcut.activated.connect(self.handle_down_arrow)
 
-        self.left_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
-        self.left_shortcut.activated.connect(self._on_qt_left)
+        self.alt_left_shortcut = QShortcut(QKeySequence("Alt+Left"), self)
+        self.alt_left_shortcut.activated.connect(self.handle_left_arrow)
 
-        self.right_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
-        self.right_shortcut.activated.connect(self._on_qt_right)
+        self.alt_right_shortcut = QShortcut(QKeySequence("Alt+Right"), self)
+        self.alt_right_shortcut.activated.connect(self.handle_right_arrow)
 
         try:
             keyboard.add_hotkey("ctrl+alt+n", self.bridge.toggle_requested.emit, suppress=False)
             keyboard.add_hotkey("f9", self.bridge.toggle_requested.emit, suppress=False)
             keyboard.add_hotkey("esc", self.bridge.force_close_requested.emit, suppress=False)
 
-            # Precise Global Keyboard Arrow Key Controls
-            keyboard.add_hotkey("up", self._on_global_up, suppress=False)
-            keyboard.add_hotkey("down", self._on_global_down, suppress=False)
-            keyboard.add_hotkey("left", self._on_global_left, suppress=False)
-            keyboard.add_hotkey("right", self._on_global_right, suppress=False)
+            # Precise Global Keyboard Alt + Arrow Key Controls (conflict-free with browser/video controls)
+            keyboard.add_hotkey("alt+up", self._on_global_up, suppress=False)
+            keyboard.add_hotkey("alt+down", self._on_global_down, suppress=False)
+            keyboard.add_hotkey("alt+left", self._on_global_left, suppress=False)
+            keyboard.add_hotkey("alt+right", self._on_global_right, suppress=False)
 
-            print("[INFO] Shortcuts registered: Esc (compact/exit), F9/Ctrl+Alt+N (toggle), ↑ (compact), ↓ (visualizer/style), ← (search), → (AI hub).")
+            print("[INFO] Shortcuts registered: Esc (compact/exit), F9/Ctrl+Alt+N (toggle), Alt+↑ (compact), Alt+↓ (visualizer/style), Alt+← (search), Alt+→ (AI hub).")
         except Exception as e:
             print(f"[ERROR] Failed to register global hotkey: {e}")
 
     def _on_global_up(self):
-        if self.pill_widget.browser_combo.hasFocus() or self.pill_widget.vis_style_combo.hasFocus():
-            return
         self.bridge.up_arrow_requested.emit()
 
     def _on_global_down(self):
-        if self.pill_widget.browser_combo.hasFocus() or self.pill_widget.vis_style_combo.hasFocus():
-            return
         self.bridge.down_arrow_requested.emit()
 
     def _on_global_left(self):
-        search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
-        if search_input.hasFocus():
-            cursor_pos = search_input.cursorPosition()
-            if cursor_pos > 0:
-                return
         self.bridge.left_arrow_requested.emit()
 
     def _on_global_right(self):
-        search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
-        if search_input.hasFocus():
-            text_len = len(search_input.text())
-            cursor_pos = search_input.cursorPosition()
-            if text_len > 0 and cursor_pos < text_len:
-                return
         self.bridge.right_arrow_requested.emit()
-
-    def _on_qt_left(self):
-        search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
-        if search_input.hasFocus():
-            cursor_pos = search_input.cursorPosition()
-            if cursor_pos > 0:
-                search_input.setCursorPosition(cursor_pos - 1)
-                return
-        self.handle_left_arrow()
-
-    def _on_qt_right(self):
-        search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
-        if search_input.hasFocus():
-            text_len = len(search_input.text())
-            cursor_pos = search_input.cursorPosition()
-            if text_len > 0 and cursor_pos < text_len:
-                search_input.setCursorPosition(cursor_pos + 1)
-                return
-        self.handle_right_arrow()
 
     def _on_esc_requested(self):
         """Esc handler: returns to compact notch if in a sub-notch, or closes app if already compact."""
@@ -2875,10 +3974,28 @@ class NotchMainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         key = event.key()
+        is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
         if key == Qt.Key.Key_Escape:
             self._on_esc_requested()
             event.accept()
             return
+        elif is_alt:
+            if key == Qt.Key.Key_Up:
+                self.handle_up_arrow()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_Down:
+                self.handle_down_arrow()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_Left:
+                self.handle_left_arrow()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_Right:
+                self.handle_right_arrow()
+                event.accept()
+                return
         elif key == Qt.Key.Key_Up:
             if not self.pill_widget.browser_combo.hasFocus() and not self.pill_widget.vis_style_combo.hasFocus():
                 self.handle_up_arrow()
@@ -2892,19 +4009,26 @@ class NotchMainWindow(QMainWindow):
         elif key == Qt.Key.Key_Left:
             search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
             if not search_input.hasFocus():
-                self.handle_left_arrow()
+                if self.pill_widget.current_mode == self.pill_widget.MODE_AI_HUB:
+                    if not self.pill_widget.focus_previous_ai_button():
+                        self.handle_left_arrow()
+                else:
+                    self.handle_left_arrow()
                 event.accept()
                 return
         elif key == Qt.Key.Key_Right:
             search_input = getattr(self.pill_widget, "search_input", self.pill_widget.search_bar)
             if not search_input.hasFocus():
-                self.handle_right_arrow()
+                if self.pill_widget.current_mode == self.pill_widget.MODE_AI_HUB:
+                    self.pill_widget.focus_next_ai_button()
+                else:
+                    self.handle_right_arrow()
                 event.accept()
                 return
             else:
                 text_len = len(search_input.text())
                 cursor_pos = search_input.cursorPosition()
-                if text_len == 0 or cursor_pos >= text_len:
+                if text_len == 0 or (cursor_pos >= text_len and not search_input.hasSelectedText()):
                     self.handle_right_arrow()
                     event.accept()
                     return
@@ -2966,6 +4090,7 @@ class NotchMainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SymbioteNotch")
+    app.setQuitOnLastWindowClosed(False)
 
     app.aboutToQuit.connect(lambda: keyboard.unhook_all())
 
