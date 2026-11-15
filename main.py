@@ -2402,6 +2402,8 @@ class SettingsGearButton(QPushButton):
 
         self.isGearSpinning = False
         self.rotation_angle = 0.0
+        self._quick_spin_remaining_steps = None
+        self._quick_spin_step_angle = 0.0
 
         # Continuous smooth rotation loop timer (60 FPS)
         self.spin_timer = QTimer(self)
@@ -2442,8 +2444,35 @@ class SettingsGearButton(QPushButton):
         hole.addEllipse(QPointF(0, 0), r_hole, r_hole)
         return path.subtracted(hole)
 
+    def quick_spin(self, duration_ms: int = 350, target_degrees: float = 360.0):
+        """Performs a smooth, quick spin animation (e.g. full rotation) when clicked."""
+        self.isGearSpinning = True
+        pill = self.window()
+        if hasattr(pill, "isGearSpinning"):
+            pill.isGearSpinning = True
+        if hasattr(self.parent(), "isGearSpinning"):
+            self.parent().isGearSpinning = True
+        self._quick_spin_remaining_steps = max(1, int(duration_ms / 16))
+        self._quick_spin_step_angle = target_degrees / float(self._quick_spin_remaining_steps)
+        if not self.spin_timer.isActive():
+            self.spin_timer.start(16)
+        self.update()
+
     def _on_spin_tick(self):
-        self.rotation_angle = (self.rotation_angle + 4.5) % 360.0
+        if getattr(self, "_quick_spin_remaining_steps", None) is not None:
+            self.rotation_angle = (self.rotation_angle + self._quick_spin_step_angle) % 360.0
+            self._quick_spin_remaining_steps -= 1
+            if self._quick_spin_remaining_steps <= 0:
+                self._quick_spin_remaining_steps = None
+                self.isGearSpinning = False
+                pill = self.window()
+                if hasattr(pill, "isGearSpinning"):
+                    pill.isGearSpinning = False
+                if hasattr(self.parent(), "isGearSpinning"):
+                    self.parent().isGearSpinning = False
+                self.spin_timer.stop()
+        else:
+            self.rotation_angle = (self.rotation_angle + 4.5) % 360.0
         self.update()
 
     def get_rotation_angle(self) -> float:
@@ -2456,6 +2485,7 @@ class SettingsGearButton(QPushButton):
     gearAngle = pyqtProperty(float, get_rotation_angle, set_rotation_angle)
 
     def set_spinning(self, spinning: bool):
+        self._quick_spin_remaining_steps = None
         self.isGearSpinning = bool(spinning)
         pill = self.window()
         if hasattr(pill, "isGearSpinning"):
@@ -2472,6 +2502,11 @@ class SettingsGearButton(QPushButton):
 
     def toggle_spin(self):
         self.set_spinning(not self.isGearSpinning)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.quick_spin()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -3329,13 +3364,16 @@ class PillWidget(QFrame):
 
     def _on_gear_clicked(self):
         """
-        Interactive Settings Gear click handler:
-        Toggles isGearSpinning state and starts or immediately stops the continuous rotation animation.
+        Interactive Settings Gear left-click handler:
+        Performs a quick spin animation and triggers the exact same context menu (options/settings)
+        normally opened via right-click, anchored neatly below the gear icon.
         """
         self.main_window.last_sound_time = time.time()
-        self.isGearSpinning = not self.isGearSpinning
-        if hasattr(self, "btn_gear") and self.btn_gear:
-            self.btn_gear.set_spinning(self.isGearSpinning)
+        btn = getattr(self, "btn_gear", getattr(self, "btn_dots_menu", None))
+        if btn:
+            btn.quick_spin()
+            pos = btn.mapToGlobal(QPoint(-20, btn.height() + 4))
+            self.show_custom_context_menu(pos)
 
     def _on_dots_menu_clicked(self):
         """Opens options dropdown menu anchored below the settings gear button."""
