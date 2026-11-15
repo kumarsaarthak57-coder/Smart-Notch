@@ -19,8 +19,8 @@ import pyaudiowpatch as pyaudio
 IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 def get_current_ist_time() -> str:
-    """Returns the current Indian Standard Time (IST) in HH:MM format."""
-    return datetime.now(IST_TIMEZONE).strftime("%H:%M")
+    """Returns the current Indian Standard Time (IST) in 12-hour format with AM/PM."""
+    return datetime.now(IST_TIMEZONE).strftime("%I:%M %p")
 
 
 def apply_acrylic_blur(window) -> bool:
@@ -2385,6 +2385,155 @@ class SmartSearchLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class SettingsGearButton(QPushButton):
+    """
+    Sleek, minimalist Settings Gear icon button replacing the 3-dots menu button.
+    Maintains an interactive rotation animation state (isGearSpinning) with continuous
+    smooth rotation loop on click.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Settings")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
+
+        self.isGearSpinning = False
+        self.rotation_angle = 0.0
+
+        # Continuous smooth rotation loop timer (60 FPS)
+        self.spin_timer = QTimer(self)
+        self.spin_timer.setInterval(16)
+        self.spin_timer.timeout.connect(self._on_spin_tick)
+
+        # Generate pre-computed gear path centered at (0, 0)
+        self._gear_path = self._generate_gear_path(teeth=6, r_out=5.6, r_in=3.8, r_hole=1.8)
+
+    def _generate_gear_path(self, teeth: int = 6, r_out: float = 5.6, r_in: float = 3.8, r_hole: float = 1.8) -> QPainterPath:
+        path = QPainterPath()
+        step = 2.0 * math.pi / teeth
+        for i in range(teeth):
+            base_a = i * step
+            t0 = base_a - step * 0.16
+            t1 = base_a - step * 0.11
+            t2 = base_a + step * 0.11
+            t3 = base_a + step * 0.16
+            v_mid = base_a + step * 0.5
+            v0 = v_mid - step * 0.18
+
+            p_t0 = QPointF(r_in * math.cos(t0), r_in * math.sin(t0))
+            p_t1 = QPointF(r_out * math.cos(t1), r_out * math.sin(t1))
+            p_t2 = QPointF(r_out * math.cos(t2), r_out * math.sin(t2))
+            p_t3 = QPointF(r_in * math.cos(t3), r_in * math.sin(t3))
+            p_v0 = QPointF(r_in * math.cos(v0), r_in * math.sin(v0))
+
+            if i == 0:
+                path.moveTo(p_t0)
+            else:
+                path.lineTo(p_t0)
+            path.lineTo(p_t1)
+            path.lineTo(p_t2)
+            path.lineTo(p_t3)
+            path.lineTo(p_v0)
+        path.closeSubpath()
+        hole = QPainterPath()
+        hole.addEllipse(QPointF(0, 0), r_hole, r_hole)
+        return path.subtracted(hole)
+
+    def _on_spin_tick(self):
+        self.rotation_angle = (self.rotation_angle + 4.5) % 360.0
+        self.update()
+
+    def get_rotation_angle(self) -> float:
+        return self.rotation_angle
+
+    def set_rotation_angle(self, val: float):
+        self.rotation_angle = val
+        self.update()
+
+    gearAngle = pyqtProperty(float, get_rotation_angle, set_rotation_angle)
+
+    def set_spinning(self, spinning: bool):
+        self.isGearSpinning = bool(spinning)
+        pill = self.window()
+        if hasattr(pill, "isGearSpinning"):
+            pill.isGearSpinning = self.isGearSpinning
+        if hasattr(self.parent(), "isGearSpinning"):
+            self.parent().isGearSpinning = self.isGearSpinning
+        if self.isGearSpinning:
+            if not self.spin_timer.isActive():
+                self.spin_timer.start(16)
+        else:
+            if self.spin_timer.isActive():
+                self.spin_timer.stop()
+        self.update()
+
+    def toggle_spin(self):
+        self.set_spinning(not self.isGearSpinning)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w = float(self.width())
+        h = float(self.height())
+        cx = w / 2.0
+        cy = h / 2.0
+
+        is_hovered = self.underMouse()
+        is_pressed = self.isDown()
+
+        # Rounded background pill/border
+        btn_rect = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
+        if is_pressed:
+            bg_brush = QBrush(QColor(0, 255, 255, 75))
+            border_pen = QPen(QColor(0, 255, 255, 255), 1.2)
+        elif self.isGearSpinning:
+            bg_brush = QBrush(QColor(0, 255, 255, 35))
+            border_pen = QPen(QColor(0, 255, 255, 200), 1.0)
+        elif is_hovered:
+            bg_brush = QBrush(QColor(255, 255, 255, 40))
+            border_pen = QPen(QColor(0, 255, 255, 180), 1.0)
+        else:
+            bg_brush = QBrush(QColor(255, 255, 255, 20))
+            border_pen = QPen(QColor(255, 255, 255, 55), 1.0)
+
+        painter.setPen(border_pen)
+        painter.setBrush(bg_brush)
+        painter.drawRoundedRect(btn_rect, (w - 1.0) / 2.0, (h - 1.0) / 2.0)
+
+        # Rotated gear icon
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(self.rotation_angle)
+
+        if is_pressed:
+            gear_color = QColor(255, 255, 255, 255)
+        elif self.isGearSpinning or is_hovered:
+            gear_color = QColor(0, 255, 255, 240)
+        else:
+            gear_color = QColor(226, 232, 240, 220)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gear_color))
+        painter.drawPath(self._gear_path)
+        painter.restore()
+
+    def contextMenuEvent(self, event):
+        """Right-click opens the options dropdown context menu."""
+        pos = self.mapToGlobal(QPoint(-20, self.height() + 4))
+        target = self.parent()
+        while target is not None:
+            if hasattr(target, "show_custom_context_menu"):
+                target.show_custom_context_menu(pos)
+                event.accept()
+                return
+            target = target.parent()
+        super().contextMenuEvent(event)
+
+
 class PillWidget(QFrame):
     """
     Main central widget as a QFrame:
@@ -2441,9 +2590,18 @@ class PillWidget(QFrame):
         self.compact_panel.setStyleSheet("background: transparent; border: none;")
         self.compact_layout = QHBoxLayout(self.compact_panel)
         self.compact_layout.setContentsMargins(8, 0, 8, 0)
-        self.compact_layout.setSpacing(4)
+        self.compact_layout.setSpacing(0)
 
-        self.clock_label_compact = QLabel(get_current_ist_time(), self.compact_panel)
+        # Left balanced container for clock display
+        self.left_box = QWidget(self.compact_panel)
+        self.left_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.left_box.setAutoFillBackground(False)
+        self.left_box.setStyleSheet("background: transparent; border: none;")
+        self.left_layout = QHBoxLayout(self.left_box)
+        self.left_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_layout.setSpacing(0)
+
+        self.clock_label_compact = QLabel(get_current_ist_time(), self.left_box)
         self.clock_label_compact.setStyleSheet("""
             color: #E2E8F0;
             font-family: 'Segoe UI', 'Consolas', sans-serif;
@@ -2453,14 +2611,12 @@ class PillWidget(QFrame):
             border: none;
             padding-right: 1px;
         """)
-        self.compact_layout.addWidget(self.clock_label_compact, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.left_layout.addWidget(self.clock_label_compact, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        self.status_dot = QLabel("●", self.compact_panel)
-        self.status_dot.setStyleSheet("color: cyan; font-size: 8px; background: transparent; border: none;")
-        self.compact_layout.addWidget(self.status_dot)
-
+        # Center username label (perfectly centered horizontally)
         display_name = (self.main_window.username or "Host")[:15]
         self.username_label = QLabel(display_name, self.compact_panel)
+        self.username_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.username_label.setStyleSheet("""
             color: #FFFFFF;
             font-family: 'Segoe UI', sans-serif;
@@ -2469,38 +2625,38 @@ class PillWidget(QFrame):
             background: transparent;
             border: none;
         """)
-        self.compact_layout.addWidget(self.username_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.mini_vis = MiniVisualizerWidget(self, self.compact_panel)
-        self.compact_layout.addWidget(self.mini_vis)
+        # Right balanced container for interactive Settings Gear icon
+        self.right_box = QWidget(self.compact_panel)
+        self.right_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.right_box.setAutoFillBackground(False)
+        self.right_box.setStyleSheet("background: transparent; border: none;")
+        self.right_layout = QHBoxLayout(self.right_box)
+        self.right_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_layout.setSpacing(0)
 
-        # Sleek, minimalist 3-dots menu button (...)
-        self.btn_dots_menu = QPushButton("⋮", self.compact_panel)
-        self.btn_dots_menu.setFixedSize(16, 16)
-        self.btn_dots_menu.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_dots_menu.setToolTip("Options Menu")
-        self.btn_dots_menu.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.22);
-                border-radius: 8px;
-                color: #E2E8F0;
-                font-size: 11px;
-                font-weight: bold;
-                padding-bottom: 2px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 0.18);
-                border: 1px solid cyan;
-                color: cyan;
-            }
-            QPushButton:pressed {
-                background-color: rgba(0, 255, 255, 0.3);
-                color: #FFFFFF;
-            }
-        """)
-        self.btn_dots_menu.clicked.connect(self._on_dots_menu_clicked)
-        self.compact_layout.addWidget(self.btn_dots_menu)
+        # Interactive sleek Settings Gear icon button
+        self.isGearSpinning = False
+        self.btn_gear = SettingsGearButton(self.right_box)
+        self.btn_gear.clicked.connect(self._on_gear_clicked)
+        self.right_layout.addWidget(self.btn_gear, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Removed indicators: status_dot (cyan indicator) and mini_vis (4 horizontal dots)
+        self.status_dot = None
+        self.mini_vis = None
+
+        # Backwards compatibility alias for dots menu references
+        self.btn_dots_menu = self.btn_gear
+
+        # Ensure exact symmetrical balancing so username_label is 100% centered horizontally
+        clock_text = self.clock_label_compact.text()
+        init_box_w = max(60, self.clock_label_compact.fontMetrics().horizontalAdvance(clock_text) + 4)
+        self.left_box.setFixedWidth(init_box_w)
+        self.right_box.setFixedWidth(init_box_w)
+
+        self.compact_layout.addWidget(self.left_box)
+        self.compact_layout.addWidget(self.username_label, stretch=1, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.compact_layout.addWidget(self.right_box)
 
         # 1-second timer for IST clock
         self.clock_timer = QTimer(self)
@@ -2918,10 +3074,15 @@ class PillWidget(QFrame):
         return False
 
     def _update_clock(self):
-        """Updates the digital clock labels with real-time Indian Standard Time (HH:MM)."""
+        """Updates the digital clock labels with real-time Indian Standard Time (12-hour format with AM/PM)."""
         ist_time = get_current_ist_time()
-        if hasattr(self, "clock_label_compact"):
+        if hasattr(self, "clock_label_compact") and self.clock_label_compact:
             self.clock_label_compact.setText(ist_time)
+            if hasattr(self, "left_box") and hasattr(self, "right_box"):
+                clock_w = max(60, self.clock_label_compact.fontMetrics().horizontalAdvance(ist_time) + 4)
+                if self.left_box.width() != clock_w:
+                    self.left_box.setFixedWidth(clock_w)
+                    self.right_box.setFixedWidth(clock_w)
 
     def reveal_search_hub(self):
         self.switch_mode(self.MODE_SEARCH)
@@ -3152,7 +3313,8 @@ class PillWidget(QFrame):
             self._apply_frame_style()
 
         self.visualizer_canvas.update()
-        self.mini_vis.update()
+        if hasattr(self, "mini_vis") and self.mini_vis:
+            self.mini_vis.update()
 
     def _is_interactive_control(self, child) -> bool:
         """Determines whether a child widget is an interactive control (button, input, dropdown)."""
@@ -3165,11 +3327,23 @@ class PillWidget(QFrame):
             curr = curr.parent()
         return False
 
-    def _on_dots_menu_clicked(self):
-        """Opens options dropdown menu anchored below the 3-dots button."""
+    def _on_gear_clicked(self):
+        """
+        Interactive Settings Gear click handler:
+        Toggles isGearSpinning state and starts or immediately stops the continuous rotation animation.
+        """
         self.main_window.last_sound_time = time.time()
-        pos = self.btn_dots_menu.mapToGlobal(QPoint(-20, self.btn_dots_menu.height() + 4))
-        self.show_custom_context_menu(pos)
+        self.isGearSpinning = not self.isGearSpinning
+        if hasattr(self, "btn_gear") and self.btn_gear:
+            self.btn_gear.set_spinning(self.isGearSpinning)
+
+    def _on_dots_menu_clicked(self):
+        """Opens options dropdown menu anchored below the settings gear button."""
+        self.main_window.last_sound_time = time.time()
+        btn = getattr(self, "btn_gear", getattr(self, "btn_dots_menu", None))
+        if btn:
+            pos = btn.mapToGlobal(QPoint(-20, btn.height() + 4))
+            self.show_custom_context_menu(pos)
 
     def _apply_frame_style(self):
         """Updates dynamic background transparency and triggers repaint."""
